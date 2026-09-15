@@ -1,0 +1,70 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Ultron</RootNamespace>
+    <AssemblyName>ULTRON</AssemblyName>
+    <ApplicationTitle>ULTRON</ApplicationTitle>
+    <ApplicationIcon>Ultron.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Version>1.0.0</Version>
+    <!-- We provide our own Main (Program.cs) so the watchdog argument is handled before XAML boots. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <!-- NoWarn lives in Directory.Build.props so the app + tools/Tests share it -->
+    <!-- This is a pure-C# WinUI app; the XAML compiler's interop targets try to locate the MSVC
+         toolset (GetLatestMSVCVersion) only when VCInstallPath32/64 are empty. Presetting them
+         lets VS build without the C++ workload installed. -->
+    <VCInstallPath32>$(VCToolsInstallDir)bin\HostX64\x86</VCInstallPath32>
+    <VCInstallPath64>$(VCToolsInstallDir)bin\HostX64\x64</VCInstallPath64>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260804001" />
+    <PackageReference Include="NAudio" Version="3.0.1" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The WindowsAppSDK metapackage transitively pulls Microsoft.WindowsAppSDK.ML which ships its own
+         onnxruntime.dll WITHOUT ConvInteger support (the int8 kokoro model needs it). It overwrites the
+         DirectML-compatible onnxruntime.dll from Microsoft.ML.OnnxRuntime.DirectML during the
+         self-contained payload copy. Restore the DirectML natives after build so speech synthesis works. -->
+    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime.dll" />
+    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime_providers_shared.dll" />
+    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\DirectML.dll" />
+    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\DirectML.Debug.dll" />
+  </ItemGroup>
+
+  <Target Name="RestoreDirectMLRuntime" AfterTargets="Build">
+    <Copy SourceFiles="$(PkgMicrosoft_ML_OnnxRuntime_DirectML)\runtimes\win-x64\native\onnxruntime.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(PkgMicrosoft_ML_OnnxRuntime_DirectML)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" />
+  </Target>
+
+  <ItemGroup>
+    <Content Include="Assets\**" />
+    <Content Include="Ultron.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="backend\**" CopyToOutputDirectory="PreserveNewest" Exclude="backend\__pycache__\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tools\**" />
+    <Content Remove="tools\**" />
+    <Page Remove="tools\**" />
+    <None Remove="tools\**" />
+    <EmbeddedResource Remove="tools\**" />
+  </ItemGroup>
+
+</Project>

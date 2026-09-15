@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Ultron.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="ULTRON">
+    <Window.SystemBackdrop>
+        <MicaBackdrop Kind="BaseAlt" />
+    </Window.SystemBackdrop>
+
+    <Grid Background="{StaticResource UltronCharcoalBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+    
+        <!-- ===================== TITLE BAR ===================== -->
+        <Grid Grid.Row="0" Height="48" Background="{StaticResource UltronGunmetalBrush}"
+              x:Name="TitleBarRoot">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="138" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Brand -->
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="10" Margin="14,0,0,0">
+                <Ellipse Width="22" Height="22">
+                    <Ellipse.Fill>
+                        <SolidColorBrush Color="{StaticResource UltronCrimson}" />
+                    </Ellipse.Fill>
+                </Ellipse>
+                <TextBlock Text="ULTRON // v1.0" FontFamily="Consolas" FontSize="14"
+                           FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" />
+            </StackPanel>
+
+            <!-- Status ticker -->
+            <Grid Grid.Column="1" x:Name="TickerHost">
+                <Border x:Name="StatusTicker" Background="#33FFFFFF" CornerRadius="4"
+                        Padding="12,4" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Ellipse x:Name="TickerDot" Width="8" Height="8" Fill="{StaticResource UltronCrimsonBrush}"
+                                 VerticalAlignment="Center" />
+                        <TextBlock x:Name="TickerText" Text="CORE STATUS: ONLINE" FontFamily="Consolas"
+                                   FontSize="11" Foreground="#FFC9CED6" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- Window controls -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                        Spacing="0" Height="48" Margin="0,0,4,4" VerticalAlignment="Top">
+                <Button x:Name="BtnMinimize" Width="46" Height="44" Padding="0" CornerRadius="0"
+                        Background="Transparent" BorderThickness="0" Click="BtnMinimize_Click">
+                    <FontIcon Glyph="&#xE921;" FontSize="10" Foreground="#FFC9CED6" />
+                </Button>
+                <Button x:Name="BtnMaximize" Width="46" Height="44" Padding="0" CornerRadius="0"
+                        Background="Transparent" BorderThickness="0" Click="BtnMaximize_Click">
+                    <FontIcon Glyph="&#xE922;" FontSize="10" Foreground="#FFC9CED6" />
+                </Button>
+                <Button x:Name="BtnClose" Width="46" Height="44" Padding="0" CornerRadius="0"
+                        Background="Transparent" BorderThickness="0" Click="BtnClose_Click">
+                    <FontIcon Glyph="&#xE8BB;" FontSize="10" Foreground="#FFC9CED6" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="1" Margin="0,48,0,0">
+            <Grid.ColumnDefinitions>
+                <!-- Left nav rail -->
+                <ColumnDefinition x:Name="RailCol" Width="56" />
+                <ColumnDefinition Width="*" />
+                <!-- Right telemetry sidebar -->
+                <ColumnDefinition x:Name="TelemetryCol" Width="272" />
+            </Grid.ColumnDefinitions>
+
+            <!-- ===================== LEFT NAV RAIL ===================== -->
+            <Border Grid.Column="0" Background="{StaticResource UltronGunmetalBrush}"
+                    BorderBrush="#33FFFFFF" BorderThickness="0,1,1,0">
+                <Grid x:Name="NavRail" Width="56">
+                    <StackPanel Orientation="Vertical" Spacing="6" Margin="0,14,0,0">
+                        <Button x:Name="NavCommandCenter" Width="44" Height="44" CornerRadius="6" Click="Nav_Click"
+                                Tag="commandCenter" Background="{StaticResource UltronCrimsonBrush}" BorderThickness="0">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="Command Center" />
+                            </ToolTipService.ToolTip>
+                            <FontIcon Glyph="&#xE7FC;" FontSize="16" Foreground="White" />
+                        </Button>
+                        <Button x:Name="NavSystemMonitor" Width="44" Height="44" CornerRadius="6" Click="Nav_Click"
+                                Tag="systemMonitor" Background="Transparent" BorderThickness="0">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="System Monitor" />
+                            </ToolTipService.ToolTip>
+                            <FontIcon Glyph="&#xE9D2;" FontSize="16" Foreground="#FFC9CED6" />
+                        </Button>
+                        <Button x:Name="NavAutomation" Width="44" Height="44" CornerRadius="6" Click="Nav_Click"
+                                Tag="automation" Background="Transparent" BorderThickness="0">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="Automation &amp; Scripts" />
+                            </ToolTipService.ToolTip>
+                            <FontIcon Glyph="&#xE950;" FontSize="16" Foreground="#FFC9CED6" />
+                        </Button>
+                        <Button x:Name="NavDirectives" Width="44" Height="44" CornerRadius="6" Click="Nav_Click"
+                                Tag="directives" Background="Transparent" BorderThickness="0">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="Logs &amp; Directives" />
+                            </ToolTipService.ToolTip>
+                            <FontIcon Glyph="&#xE9D9;" FontSize="16" Foreground="#FFC9CED6" />
+                        </Button>
+                        <Button x:Name="NavMemory" Width="44" Height="44" CornerRadius="6" Click="Nav_Click"
+                                Tag="memory" Background="Transparent" BorderThickness="0">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="Memory" />
+                            </ToolTipService.ToolTip>
+                            <FontIcon Glyph="&#xE81C;" FontSize="16" Foreground="#FFC9CED6" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- ===================== CENTRAL WORKSPACE ===================== -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="190" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Visualizer HUD -->
+                    <Grid Grid.Row="0" Background="Transparent" Margin="0,6,0,0">
+                        <Ellipse x:Name="OrbContainer" Width="132" Height="132"
+                                 StrokeThickness="4"
+                                 Fill="#33FF2E2E"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Ellipse.Stroke>
+                                <RadialGradientBrush>
+                                    <GradientStop Color="#FFFF2E2E" Offset="0" />
+                                    <GradientStop Color="#66FF2E2E" Offset="1" />
+                                </RadialGradientBrush>
+                            </Ellipse.Stroke>
+                            <Ellipse.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="OrbPulse" ScaleX="1" ScaleY="1" />
+                                    <RotateTransform x:Name="OrbSpin" Angle="0" />
+                                </TransformGroup>
+                            </Ellipse.RenderTransform>
+                        </Ellipse>
+                        <TextBlock x:Name="OrbStateLabel" Text="STANDBY" FontFamily="Consolas"
+                                   FontSize="12" Foreground="#FF9BA1AB"
+                                   HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12" />
+                    </Grid>
+
+                    <!-- Conversation stream -->
+                    <ListView x:Name="ConversationList" Grid.Row="1"
+                              Background="Transparent" BorderThickness="0"
+                              SelectionMode="None" Margin="18,0,18,0"
+                              Padding="0,8,0,0"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0,2,0,2" />
+                                <Setter Property="Background" Value="Transparent" />
+                                <Setter Property="MinHeight" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                    </ListView>
+
+                    <!-- ===================== MEMORY PANEL ===================== -->
+                    <Grid x:Name="MemoryView" Grid.RowSpan="2" Visibility="Collapsed" Margin="18,6,18,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Spacing="8" Margin="0,0,0,8">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="LONG-TERM MEMORY" FontFamily="Consolas" FontSize="13"
+                                           Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <TextBlock x:Name="MemoryCountText" Text="" FontFamily="Consolas" FontSize="11"
+                                           Foreground="#FF9BA1AB" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="5*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="MemorySearch" PlaceholderText="Search memory..."
+                                         CornerRadius="6" Background="#FF1D1F24" BorderBrush="#33444444"
+                                         FontFamily="Consolas" FontSize="12" TextChanged="MemorySearch_TextChanged" />
+                                <Button Grid.Column="1" Content="Refresh" Click="MemoryRefresh_Click"
+                                        CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="10,8" />
+                                <Button Grid.Column="2" Content="Add" Click="MemoryAdd_Click"
+                                        CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="10,8" />
+                                <Button Grid.Column="3" Content="Clear All" Click="MemoryClear_Click"
+                                        CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="10,8"
+                                        Background="#33FF2E2E" />
+                            </Grid>
+                            <TextBlock x:Name="MemoryHint" Text="Ask Gemini to 'remember X' or 'forget X' in conversation; edit/delete entries here."
+                                       FontFamily="Consolas" FontSize="10" Foreground="#FF9BA1AB" TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="MemoryList" />
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+
+                <!-- Quick command bar -->
+                <Grid Grid.Row="1" Padding="18,10,18,14" Background="Transparent">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="CommandInput" PlaceholderText="Type a command..."
+                             CornerRadius="6" Background="#FF1D1F24" BorderBrush="#33444444"
+                             KeyDown="CommandInput_KeyDown" FontFamily="Consolas" FontSize="13" MinHeight="38" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" x:Name="MicButton" Content="&#xE720;" Margin="8,0,0,0"
+                            Width="44" Height="38" CornerRadius="6" VerticalAlignment="Center"
+                            Background="Transparent" BorderThickness="1"
+                            FontFamily="Segoe MDL2 Assets" FontSize="16" Click="MicButton_Click"
+                            ToolTipService.ToolTip="Push to talk" />
+                    <Button Grid.Column="2" x:Name="SendButton" Content="&#xE724;" Margin="8,0,0,0"
+                            Width="44" Height="38" CornerRadius="6" VerticalAlignment="Center"
+                            Background="{StaticResource UltronCrimsonBrush}" BorderThickness="0"
+                            FontFamily="Segoe MDL2 Assets" FontSize="16" Click="SendButton_Click"
+                            ToolTipService.ToolTip="Send command" />
+                </Grid>
+            </Grid>
+
+            <!-- ===================== RIGHT TELEMETRY SIDEBAR ===================== -->
+            <Border Grid.Column="2" Background="{StaticResource UltronGunmetalBrush}"
+                    BorderBrush="#33FFFFFF" BorderThickness="1,1,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Padding="16" Spacing="16">
+
+                        <TextBlock Text="DIAGNOSTICS" FontFamily="Consolas" FontSize="11"
+                                   Foreground="#FF9BA1AB" FontWeight="SemiBold" />
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="MEM  --" x:Name="MemText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                            <TextBlock Text="CPU  --" x:Name="CpuText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                            <TextBlock Text="THR  --" x:Name="ThreadText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                            <TextBlock Text="CAM  --" x:Name="CamText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                        </StackPanel>
+
+                        <Grid Height="46">
+                            <Polyline x:Name="SparkLine" Stroke="{StaticResource UltronGoldBrush}" StrokeThickness="1.5"
+                                      Points="0,18 8,20 16,12 24,16 32,8 40,14 48,10 56,4 64,12 72,8 80,2" />
+                        </Grid>
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="VOICE-ID CONFIDENCE" FontFamily="Consolas" FontSize="11"
+                                       Foreground="#FF9BA1AB" FontWeight="SemiBold" />
+                            <Grid Height="8">
+                                <Border Height="8" CornerRadius="4" Background="#22FFFFFF" />
+                                <Border x:Name="ConfidenceFill" Height="8" CornerRadius="4"
+                                        HorizontalAlignment="Left" Width="0" Background="#FF9BA1AB" />
+                            </Grid>
+                            <TextBlock x:Name="ConfidenceText" Text="no voice profile"
+                                       FontFamily="Consolas" FontSize="10" Foreground="#FFC9CED6" />
+                        </StackPanel>
+
+                        <TextBlock Text="QUICK ACTIONS" FontFamily="Consolas" FontSize="11"
+                                   Foreground="#FF9BA1AB" FontWeight="SemiBold" />
+
+                        <Grid ColumnSpacing="8" RowSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Button Grid.Row="0" Grid.Column="0" Content="Purge Cache" Click="QuickAction_Click" Tag="purge"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                            <Button Grid.Row="0" Grid.Column="1" Content="System Lock" Click="QuickAction_Click" Tag="lock"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                            <Button Grid.Row="1" Grid.Column="0" Content="Focus Mode" Click="QuickAction_Click" Tag="focus"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                            <Button Grid.Row="1" Grid.Column="1" Content="Wake Toggle" Click="QuickAction_Click" Tag="wake"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                            <Button Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Open Settings" Click="QuickAction_Click" Tag="settings"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                        </Grid>
+
+                        <!-- Placeholder view: System Monitor / Automation / Directives -->
+                        <StackPanel>
+                            <TextBlock x:Name="SecondaryViewTitle" Text="" FontFamily="Consolas" FontSize="13"
+                                       Foreground="White" FontWeight="SemiBold" />
+                            <TextBlock x:Name="SecondaryViewBody" Text="Module under construction."
+                                       FontFamily="Consolas" FontSize="11" Foreground="#FF9BA1AB" TextWrapping="Wrap" Margin="0,8,0,0" />
+                        </StackPanel>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/obj/**;**/bin/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="..\..\Models\Conversation.cs" />
+    <Compile Remove="..\..\Services\AppSettings.cs" />
+    <Compile Remove="..\..\Services\Brain.cs" />
+    <Compile Remove="..\..\Services\MemoryStore.cs" />
+    <Compile Remove="..\..\Services\ZenApiClient.cs" />
+    <Compile Include="..\..\Models\Conversation.cs" />
+    <Compile Include="..\..\Services\AppSettings.cs" />
+    <Compile Include="..\..\Services\Brain.cs" />
+    <Compile Include="..\..\Services\MemoryStore.cs" />
+    <Compile Include="..\..\Services\Secrets.cs" />
+    <Compile Include="..\..\Services\ZenApiClient.cs" />
+    <Compile Remove="ParseTest\**" />
+    <Compile Remove="Probe\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
+  </ItemGroup>
+</Project>

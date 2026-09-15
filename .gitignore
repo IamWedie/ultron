@@ -1,0 +1,14 @@
+bin/
+obj/
+*.user
+.vs/
+*.suo
+AppPackages/
+BundleArtifacts/
+Generated Files/
+*.appx
+*.msix
+*.msixbundle
+Diagnostics/
+__pycache__/
+*.pyc
