@@ -39,9 +39,10 @@
 
   <ItemGroup>
     <!-- The WindowsAppSDK metapackage transitively pulls Microsoft.WindowsAppSDK.ML which ships its own
-         onnxruntime.dll WITHOUT ConvInteger support (the int8 kokoro model needs it). It overwrites the
-         DirectML-compatible onnxruntime.dll from Microsoft.ML.OnnxRuntime.DirectML during the
-         self-contained payload copy. Restore the DirectML natives after build so speech synthesis works. -->
+         onnxruntime.dll WITHOUT ConvInteger support (the int8 quantized on-device models need it). It
+         overwrites the DirectML-compatible onnxruntime.dll from Microsoft.ML.OnnxRuntime.DirectML during
+         the self-contained payload copy. Restore the DirectML natives after build so on-device
+         inference (Whisper STT, Silero VAD) keeps working. -->
     <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime.dll" />
     <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime_providers_shared.dll" />
     <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\DirectML.dll" />

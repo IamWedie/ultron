@@ -77,4 +77,87 @@ public class GeminiBackendTests
         var ex = Record.Exception(() => be.ProcessLine("""{"type":"totally_unknown","x":1}"""));
         Assert.Null(ex);
     }
+
+    [Fact]
+    public void ProcessLine_Contact_RaisesEvent()
+    {
+        using var be = new GeminiBackend();
+        ContactRequest? req = null;
+        be.ContactRequested += r => req = r;
+        be.ProcessLine("""{"type":"contact","id":"5","area":"guardian","text":"CPU at 94%","priority":"high","ask":false,"reply_id":""}""");
+        Assert.NotNull(req);
+        Assert.Equal("guardian", req!.Area);
+        Assert.Equal("CPU at 94%", req.Text);
+        Assert.Equal("high", req.Priority);
+        Assert.False(req.Ask);
+    }
+
+    [Fact]
+    public void ProcessLine_Contact_MissingFields_Defaults()
+    {
+        using var be = new GeminiBackend();
+        ContactRequest? req = null;
+        be.ContactRequested += r => req = r;
+        be.ProcessLine("""{"type":"contact","text":"ping"}""");
+        Assert.NotNull(req);
+        Assert.Equal("guardian", req!.Area);
+        Assert.Equal("normal", req.Priority);
+        Assert.False(req.Ask);
+    }
+
+    [Fact]
+    public void ProcessLine_TelegramStatus_RaisesEvent()
+    {
+        using var be = new GeminiBackend();
+        (string Phase, string Message, bool Available)? got = null;
+        be.TelegramStatusChanged += (p, m, a) => got = (p, m, a);
+        be.ProcessLine("""{"type":"telegram_status","phase":"connected","message":"CONNECTED","available":true}""");
+        Assert.Equal(("connected", "CONNECTED", true), got);
+    }
+
+    [Fact]
+    public void ProcessLine_TelegramCodeRequired_RaisesEvent()
+    {
+        using var be = new GeminiBackend();
+        (string Phone, string Hint)? got = null;
+        be.TelegramCodeRequired += (p, h) => got = (p, h);
+        be.ProcessLine("""{"type":"telegram_code_required","phone":"+15551234","hint":"Enter code"}""");
+        Assert.Equal(("+15551234", "Enter code"), got);
+    }
+
+    [Fact]
+    public void ProcessLine_TelegramCodeResult_RaisesEvent()
+    {
+        using var be = new GeminiBackend();
+        (bool Ok, string Msg)? got = null;
+        be.TelegramCodeResult += (o, m) => got = (o, m);
+        be.ProcessLine("""{"type":"telegram_code_result","ok":true,"message":"Logged in"}""");
+        Assert.Equal((true, "Logged in"), got);
+    }
+
+    [Fact]
+    public void ProcessLine_TelegramTargetResult_RaisesEvent()
+    {
+        using var be = new GeminiBackend();
+        TelegramTargetResult? got = null;
+        be.TelegramTargetResolved += r => got = r;
+        be.ProcessLine("""{"type":"telegram_target_result","ok":true,"target":"@owner","user_id":"12345","name":"Owner","message":"Target resolved: @owner [12345]"}""");
+        Assert.NotNull(got);
+        Assert.True(got!.Ok);
+        Assert.Equal("@owner", got.Target);
+        Assert.Equal("12345", got.UserId);
+        Assert.Equal("Owner", got.Name);
+    }
+
+    [Theory]
+    [InlineData("""{"type":"telegram_status"}""")]
+    [InlineData("""{"type":"telegram_code_required"}""")]
+    [InlineData("""{"type":"telegram_code_result"}""")]
+    [InlineData("""{"type":"telegram_target_result"}""")]
+    public void ProcessLine_Telegram_MissingFields_DoesNotThrow(string line)
+    {
+        using var be = new GeminiBackend();
+        var ex = Record.Exception(() => be.ProcessLine(line));
+        Assert.Null(ex);
+    }
 }

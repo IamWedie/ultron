@@ -60,6 +60,14 @@ import computer_use
 import guardian
 import productivity
 
+# --- Telegram account client (auth/session for voice calls) ---
+try:
+    from telegram_client import TelegramController
+    _HAS_TELEGRAM = True
+except ImportError:
+    TelegramController = None
+    _HAS_TELEGRAM = False
+
 try:
     from PIL import Image
     _HAS_PIL = True
@@ -680,6 +688,23 @@ TOOL_DECLARATIONS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "set_away_mode",
+        "description": (
+            "Marks the user as AWAY from the PC. While away, ULTRON routes guardian "
+            "alerts, rule reminders and other urgent notifications to the user's "
+            "phone/messages instead of speaking them locally. Call when the user "
+            "says they are leaving, going out, heading to work or bed, etc. "
+            "action 'on' enables away mode, 'off' disables it."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "'on' to enable away mode, 'off' to disable"},
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 # ============================================================
@@ -829,10 +854,12 @@ class GeminiSession:
         self._wake_listening_timeout = 25.0   # turn-based: sleep if no speech within this window
         self._voice = UltronVoice(enabled=False, semitones=-3.5) if _HAS_DSP else None
         self._monitor_enabled = False          # background_monitor toggle
+        self._away_mode = False                # outreach: route alerts to messages while away
         self._monitor_interval = 1800.0        # ~30 min
         self._suppress_turn = False            # hide+silence a forced/background turn
         self._mic_device = None                # overridden input device index
         self.persona = dict(DEFAULT_PERSONA)   # personality knobs, mirrored from C#
+        self.telegram = TelegramController(_send_event) if _HAS_TELEGRAM else None
 
     def _send_exception(self, where: str, e: Exception):
         _send_event({"type": "error", "message": f"{where}: {e}"})
@@ -904,6 +931,8 @@ class GeminiSession:
             asyncio.create_task(self._run_sleep_watch())
             asyncio.create_task(self._run_monitor_task())
             asyncio.create_task(self._run_guardian_task())
+            if self.telegram is not None:
+                asyncio.create_task(self.telegram.run())
 
         # Reconnection loop with exponential backoff. Each attempt rebuilds the
         # client + session so a stale/dead socket can never block a fresh one.
@@ -922,6 +951,7 @@ class GeminiSession:
                         "capabilities": [
                             "voice", "tools", "live_vision", "computer_use",
                             "guardian", "documents", "task_inbox", "dsp",
+                            "telegram",
                         ],
                     })
                     _send_event({"type": "status", "state": "connected", "message": "Gemini Live connected"})
@@ -1201,7 +1231,8 @@ class GeminiSession:
     async def _run_guardian_task(self):
         """Proactive health watchdog: when a threshold is breached, speak a
         short alert through the Live session (audible, real turn). Cooldown
-        prevents the same alert from nagging repeatedly."""
+        prevents the same alert from nagging repeatedly. Also triggers Telegram
+        calls for away-mode delivery."""
         while self._running:
             try:
                 await asyncio.sleep(30)
@@ -1230,8 +1261,40 @@ class GeminiSession:
                 self._guardian_last_alert[key] = now
                 try:
                     await self._speak_unsolicited(alert)
+                    is_reminder = alert.startswith("Overdue from your task inbox:")
+                    area = "reminder" if is_reminder else "guardian"
+                    priority = "high" if "Battery" in alert or "CPU" in alert or "Memory" in alert else "normal"
+                    
+                    # Always send contact event for remote delivery
+                    self._emit_contact(alert, area=area, priority=priority)
+                    
+                    # Also trigger Telegram call for away mode or high-priority alerts
+                    if self._away_mode or priority == "high":
+                        await self._trigger_telegram_call(alert, is_reminder, priority)
                 except Exception:
                     pass
+
+    async def _trigger_telegram_call(self, alert: str, is_reminder: bool, priority: str):
+        """Trigger a Telegram call with the alert as payload."""
+        try:
+            source = "reminder" if "Overdue from your task inbox:" in alert else "guardian"
+            title = "Task Reminder" if is_reminder else "System Alert"
+            body = alert.replace("Overdue from your task inbox: ", "")
+            
+            payload = {
+                "source": source,
+                "title": title,
+                "body": body,
+                "priority": priority,
+                "requires_ack": False
+            }
+            
+            _send_event({
+                "type": "telegram_call_start",
+                "payload": payload
+            })
+        except Exception:
+            pass
 
     async def _speak_unsolicited(self, text: str):
         """Push a real (audible) user turn so Gemini responds aloud. Used by
@@ -1239,6 +1302,19 @@ class GeminiSession:
         if self.session is None:
             return
         await self.session.send_text(f"SYSTEM ALERT, act on it briefly and speak one or two concise lines: {text}")
+
+    def _emit_contact(self, text: str, area: str = "guardian", priority: str = "normal"):
+        """Forward an outbound notification to the shell (C#) so it can reach
+        the user remotely (Telegram/SMS) while they are away."""
+        _send_event({
+            "type": "contact",
+            "id": f"{int(time.time() * 1000)}",
+            "area": area,
+            "text": text,
+            "priority": priority,
+            "ask": False,
+            "reply_id": "",
+        })
 
     async def _run_monitor_task(self):
         """Periodic background-topic check. Only runs when the session is idle
@@ -1729,6 +1805,56 @@ class GeminiSession:
             fut = self._computer_act_responses.get(seq)
             if fut is not None and not fut.done():
                 fut.set_result(str(msg.get("result", "") or ""))
+        elif msg_type == "set_away":
+            self._away_mode = bool(msg.get("on", False))
+            _send_event({"type": "status", "state": "away_mode",
+                         "message": f"Away mode {'ON — routing alerts to your messages' if self._away_mode else 'OFF'}."})
+        elif msg_type == "telegram_login":
+            if self.telegram is not None:
+                await self.telegram.login(msg)
+            else:
+                _send_event({"type": "telegram_status", "phase": "unavailable",
+                             "message": "Telegram client module not loaded."})
+        elif msg_type == "telegram_code":
+            if self.telegram is not None:
+                await self.telegram.submit_code(msg)
+            else:
+                _send_event({"type": "telegram_code_result", "ok": False,
+                             "message": "Telegram client module not loaded."})
+        elif msg_type == "telegram_status":
+            if self.telegram is not None:
+                await self.telegram.status()
+            else:
+                _send_event({"type": "telegram_status", "phase": "unavailable",
+                             "message": "Telegram client module not loaded."})
+        elif msg_type == "telegram_logout":
+            if self.telegram is not None:
+                await self.telegram.logout()
+        elif msg_type == "telegram_resolve_target":
+            if self.telegram is not None:
+                await self.telegram.resolve_target(msg)
+        elif msg_type == "telegram_call_start":
+            if self.telegram is not None:
+                await self.telegram.call_start(
+                    msg,
+                    mic_queue=self._mic_queue,
+                    audio_out_queue=self._audio_out_queue
+                )
+            else:
+                _send_event({"type": "telegram_call_result", "ok": False,
+                             "message": "Telegram client module not loaded."})
+        elif msg_type == "telegram_call_stop":
+            if self.telegram is not None:
+                await self.telegram.call_stop()
+            else:
+                _send_event({"type": "telegram_call_result", "ok": False,
+                             "message": "Telegram client module not loaded."})
+        elif msg_type == "telegram_call_status":
+            if self.telegram is not None:
+                await self.telegram.call_status()
+            else:
+                _send_event({"type": "telegram_call_state", "state": "unavailable",
+                             "message": "Telegram client module not loaded."})
         elif msg_type == "set_live_vision":
             self._live_vision = bool(msg.get("enabled", False))
             if not self._live_vision:

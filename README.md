@@ -15,7 +15,7 @@ runs your tools, and never stops quietly reconnecting if the world blinks.
 - **Real-time Gemini Live voice** — hands-free conversation with audio streaming, not text-in-a-box.
 - **Wake word** ("Hey Ultron" / "Yo Ultron" / configurable phrases) with auto-sleep when idle.
 - **Push-to-talk**, global mute, and wake via hotkeys — configurable, conflict-checked at startup.
-- **Local fallback pipeline** — Whisper STT, Silero VAD, Kokoro TTS (downloaded on first run, no cloud needed).
+- **Local fallback pipeline** — Whisper STT + Silero VAD (downloaded on first run, no cloud needed); voice replies are always Gemini Live voices.
 - **Voice-ID owner enrollment** — optional owner-gated access.
 - **"Ultron" voice DSP** — pitch / chorus / bass / darken processing of everything it says, tuned by voice command ("deeper", "more robotic").
 
@@ -72,14 +72,15 @@ Honest status of the rougher edges:
 
 ## Model files (local mode only)
 
-When no Gemini key is set, ULTRON downloads Whisper, Silero-VAD and Kokoro
-models on first run to `%LOCALAPPDATA%\Ultron\models`:
+When no Gemini key is set, ULTRON downloads the Whisper (STT) and Silero-VAD
+models on first run to `%LOCALAPPDATA%\Ultron\models`. The VAD model is also
+downloaded in Gemini mode — it gates mic audio so noise and echo never reach
+Gemini. Voice **output** is always Gemini Live (no local TTS).
 
 | File | Source |
 | ---- | ------ |
 | whisper-encoder/decoder/tokenizer | onnx-community/whisper-tiny.en (HuggingFace) |
 | silero-vad.onnx | snakers4/silero-vad (GitHub) |
-| kokoro-v1.0.int8.onnx + voices | thewh1teagle/kokoro-onnx (GitHub) |
 
 At startup the app runs non-blocking first-run checks and surfaces any missing
 prerequisite (Python, backend script, models, adb) in the chat window.

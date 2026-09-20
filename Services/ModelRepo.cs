@@ -25,8 +25,6 @@ public sealed class ModelRepo
         ["whisper-decoder.onnx"] = "https://huggingface.co/onnx-community/whisper-tiny.en/resolve/main/onnx/decoder_model_merged_quantized.onnx",
         ["whisper-tokenizer.json"] = "https://huggingface.co/onnx-community/whisper-tiny.en/resolve/main/tokenizer.json",
         ["silero-vad.onnx"] = "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx",
-        ["kokoro-v1.0.int8.onnx"] = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx",
-        ["kokoro-voices-v1.0.bin"] = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin",
     };
 
     public async Task<string> EnsureAsync(string key)

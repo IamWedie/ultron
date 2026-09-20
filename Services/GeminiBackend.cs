@@ -33,6 +33,15 @@ public sealed class PersonaSettings
     };
 }
 
+public sealed record ContactRequest(string Id, string Area, string Text, string Priority, bool Ask, string ReplyId);
+
+/// <summary>Telegram call-account credentials handed to the backend process via
+/// environment variables. api_hash is kept only in memory / DPAPI-protected config.</summary>
+public sealed record TelegramCallOptions(string ApiId, string ApiHash, string Phone, bool Enabled, string Target);
+
+/// <summary>Outcome of resolving the configured Telegram call target to a user account.</summary>
+public sealed record TelegramTargetResult(bool Ok, string Message, string UserId, string Name, string Target);
+
 public sealed class GeminiBackend : IDisposable
 {
     private static readonly string BackendScript =
@@ -63,12 +72,21 @@ public sealed class GeminiBackend : IDisposable
     public event Action<string, JsonElement>? ComputerActRequested; // id, action
     public event Action<string>? ErrorOccurred;
     public event Action? Disconnected;
+    public event Action<ContactRequest>? ContactRequested;
+    public event Action<string, string, bool>? TelegramStatusChanged; // phase, message, available
+    public event Action<string, string>? TelegramCodeRequired;        // phone, hint
+    public event Action<bool, string>? TelegramCodeResult;            // ok, message
+    public event Action<TelegramTargetResult>? TelegramTargetResolved;
+    public event Action<string, string>? TelegramCallStateChanged;    // state, message
+    public event Action<bool, string>? TelegramCallResult;            // ok, message
+    public event Action<string, string, string>? TelegramCallFallbackSent; // source, target, reason
 
     public bool IsConnected => _proc is { HasExited: false };
     public string State { get; private set; } = "disconnected";
     public string BackendVersion { get; private set; } = "";
     public IReadOnlySet<string> BackendCapabilities { get; private set; } = new HashSet<string>();
     public PersonaSettings Persona { get; private set; } = new();
+    public TelegramCallOptions? TelegramOptions { get; set; }
 
     public event Action<string>? BackendInfoReceived; // "version vX — cap1, cap2"
 
@@ -109,6 +127,11 @@ public sealed class GeminiBackend : IDisposable
         };
         psi.Environment["GEMINI_API_KEY"] = apiKey;
         psi.Environment["ULTRON_VOICE"] = voice;
+        psi.Environment["ULTRON_TELEGRAM_API_ID"] = TelegramOptions?.ApiId ?? "";
+        psi.Environment["ULTRON_TELEGRAM_API_HASH"] = TelegramOptions?.ApiHash ?? "";
+        psi.Environment["ULTRON_TELEGRAM_TARGET"] = TelegramOptions?.Target ?? "";
+        psi.Environment["ULTRON_TELEGRAM_PHONE"] = TelegramOptions?.Phone ?? "";
+        psi.Environment["ULTRON_TELEGRAM_ENABLED"] = TelegramOptions is { Enabled: true } ? "1" : "0";
 
         _proc = Process.Start(psi);
         if (_proc is null)
@@ -253,6 +276,62 @@ public sealed class GeminiBackend : IDisposable
         await SendAsync(new { type = "set_live_vision", enabled });
     }
 
+    public async Task SetAwayAsync(bool on)
+    {
+        await SendAsync(new { type = "set_away", on });
+    }
+
+    public async Task SendContactReplyAsync(string replyId, bool ok, string text)
+    {
+        await SendAsync(new { type = "contact_reply", reply_id = replyId, ok, text });
+    }
+
+    public async Task SendTelegramLoginAsync(string? phone = null, string? apiId = null, string? apiHash = null)
+    {
+        await SendAsync(new
+        {
+            type = "telegram_login",
+            api_id = apiId,
+            api_hash = apiHash,
+            phone,
+        });
+    }
+
+    public async Task SendTelegramCodeAsync(string code)
+    {
+        await SendAsync(new { type = "telegram_code", code });
+    }
+
+    public async Task SendTelegramLogoutAsync()
+    {
+        await SendAsync(new { type = "telegram_logout" });
+    }
+
+    public async Task SendTelegramStatusAsync()
+    {
+        await SendAsync(new { type = "telegram_status" });
+    }
+
+    public async Task SendTelegramResolveTargetAsync(string target)
+    {
+        await SendAsync(new { type = "telegram_resolve_target", target });
+    }
+
+    public async Task SendTelegramCallStartAsync(object? payload = null)
+    {
+        await SendAsync(new { type = "telegram_call_start", payload });
+    }
+
+    public async Task SendTelegramCallStopAsync()
+    {
+        await SendAsync(new { type = "telegram_call_stop" });
+    }
+
+    public async Task SendTelegramCallStatusAsync()
+    {
+        await SendAsync(new { type = "telegram_call_status" });
+    }
+
     /// <summary>Applies a new personality to the running backend. If the
     /// process is alive this updates the live session's system instruction
     /// (it reconnects); otherwise the value is kept and carried by the next
@@ -386,6 +465,68 @@ public sealed class GeminiBackend : IDisposable
                 var actId = msg.GetProperty("id").GetString() ?? "";
                 if (msg.TryGetProperty("action", out var actEl) && actEl.ValueKind == JsonValueKind.Object)
                     ComputerActRequested?.Invoke(actId, actEl);
+                break;
+
+            case "contact":
+                var contactText = msg.TryGetProperty("text", out var ct) ? ct.GetString() ?? "" : "";
+                var contact = new ContactRequest(
+                    msg.TryGetProperty("id", out var cid) ? cid.GetString() ?? "" : "",
+                    msg.TryGetProperty("area", out var ca) ? ca.GetString() ?? "" : "guardian",
+                    contactText,
+                    msg.TryGetProperty("priority", out var cp) ? cp.GetString() ?? "" : "normal",
+                    msg.TryGetProperty("ask", out var cask) ? cask.GetBoolean() : false,
+                    msg.TryGetProperty("reply_id", out var cr) ? cr.GetString() ?? "" : "");
+                Dbg($"Contact [{contact.Area}/{contact.Priority}]: {AppLog.Redact(contactText[..Math.Min(120, contactText.Length)])}");
+                ContactRequested?.Invoke(contact);
+                break;
+
+            case "telegram_status":
+                var tgPhase = msg.TryGetProperty("phase", out var tp) ? tp.GetString() ?? "" : "";
+                var tgMsg = msg.TryGetProperty("message", out var tm) ? tm.GetString() ?? "" : "";
+                var tgAvail = msg.TryGetProperty("available", out var ta) && ta.GetBoolean();
+                TelegramStatusChanged?.Invoke(tgPhase, AppLog.Redact(tgMsg), tgAvail);
+                break;
+
+            case "telegram_code_required":
+                var phone = msg.TryGetProperty("phone", out var cph) ? cph.GetString() ?? "" : "";
+                var hint = msg.TryGetProperty("hint", out var ch) ? ch.GetString() ?? "" : "";
+                TelegramCodeRequired?.Invoke(phone, AppLog.Redact(hint));
+                break;
+
+            case "telegram_code_result":
+                var okRes = msg.TryGetProperty("ok", out var crok) && crok.GetBoolean();
+                var resultMsg = msg.TryGetProperty("message", out var cmsg) ? cmsg.GetString() ?? "" : "";
+                TelegramCodeResult?.Invoke(okRes, AppLog.Redact(resultMsg));
+                break;
+
+            case "telegram_target_result":
+                var tOk = msg.TryGetProperty("ok", out var trok) && trok.GetBoolean();
+                var tMsg = msg.TryGetProperty("message", out var trmsg) ? trmsg.GetString() ?? "" : "";
+                var tId = msg.TryGetProperty("user_id", out var trid) ? trid.GetString() ?? "" : "";
+                var tName = msg.TryGetProperty("name", out var trname) ? trname.GetString() ?? "" : "";
+                var tTarget = msg.TryGetProperty("target", out var trt) ? trt.GetString() ?? "" : "";
+                TelegramTargetResolved?.Invoke(new TelegramTargetResult(
+                    tOk, AppLog.Redact(tMsg), tId, tName, tTarget));
+                break;
+
+            case "telegram_call_state":
+                var csState = msg.TryGetProperty("state", out var cst) ? cst.GetString() ?? "" : "";
+                var csMsg = msg.TryGetProperty("message", out var csmsg) ? csmsg.GetString() ?? "" : "";
+                TelegramCallStateChanged?.Invoke(csState, AppLog.Redact(csMsg));
+                break;
+
+            case "telegram_call_result":
+                var csOk = msg.TryGetProperty("ok", out var csok) && csok.GetBoolean();
+                var csResMsg = msg.TryGetProperty("message", out var csrmsg) ? csrmsg.GetString() ?? "" : "";
+                TelegramCallResult?.Invoke(csOk, AppLog.Redact(csResMsg));
+                break;
+
+            case "telegram_call_fallback_sent":
+                var fbOk = msg.TryGetProperty("ok", out var fbo) && fbo.GetBoolean();
+                var fbTarget = msg.TryGetProperty("target", out var ft) ? ft.GetString() ?? "" : "";
+                var fbSource = msg.TryGetProperty("source", out var fs) ? fs.GetString() ?? "" : "";
+                var fbReason = msg.TryGetProperty("reason", out var fr) ? fr.GetString() ?? "" : "";
+                TelegramCallFallbackSent?.Invoke(fbSource, fbTarget, fbReason);
                 break;
         }
     }

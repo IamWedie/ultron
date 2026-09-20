@@ -16,6 +16,7 @@
     <Compile Include="..\..\Services\Secrets.cs" />
     <Compile Include="..\..\Services\MemoryStore.cs" />
     <Compile Include="..\..\Services\GeminiBackend.cs" />
+    <Compile Include="..\..\Services\Outreach.cs" />
     <Compile Include="..\..\Services\UltronOptions.cs" />
     <Compile Include="..\..\Services\TrayIcon.cs" />
     <Compile Include="..\..\Services\HotkeyService.cs" />

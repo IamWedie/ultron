@@ -4,6 +4,7 @@ using Microsoft.UI.Windowing;
 using Ultron.Services;
 using Windows.System;
 using Windows.UI;
+using Microsoft.UI;
 using Xaml = Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -13,7 +14,6 @@ using System.Text.Json;
 using System.Collections.Concurrent;
 using System.Buffers;
 using System.Collections;
-using NAudio.Wave;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using QRCoder;
@@ -33,6 +33,7 @@ public sealed partial class MainWindow : Window
     private readonly AppSettings _settings;
     private readonly MemoryStore _memory;
     private readonly Brain _brain;
+    private readonly Outreach _outreach;
     private readonly AssistantStateMachine _sm;
     private readonly SystemTelemetry _telemetry = new();
     private readonly AudioCapture? _audio;
@@ -47,6 +48,9 @@ public sealed partial class MainWindow : Window
 
     private readonly ModelRepo _repo;
     private readonly GeminiBackend _gemini;
+    private TextBlock? _tgStatusText;
+    private StackPanel? _tgCodePanel;
+    private TextBox? _tgCodeBox;
     private volatile bool _geminiMode;
     private bool _awakeInGemini = true;
     private bool _wakeGateOn;
@@ -54,7 +58,6 @@ public sealed partial class MainWindow : Window
     private IntPtr _lastTargetWindow = IntPtr.Zero;
     private WhisperStt? _whisper;
     private SileroVad? _vad;
-    private KokoroTts? _kokoro;
     private readonly List<float> _vadBuf = new();
     private readonly List<float> _speechSeg = new();
     private bool _vadSpeaking;
@@ -63,11 +66,6 @@ public sealed partial class MainWindow : Window
     private bool _modelsLoaded;
     private readonly ConcurrentQueue<float[]> _sttQueue = new();
     private bool _sttPumping;
-    private volatile bool _speechInterrupt;
-    private WaveOut? _activePlayer;
-    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _speechQueue = new();
-    private readonly StringBuilder _speechPending = new();
-    private readonly SemaphoreSlim _speechGate = new(1, 1);
 
     private TrayIcon? _tray;
     private HotkeyService? _hotkeys;
@@ -76,6 +74,8 @@ public sealed partial class MainWindow : Window
     private string? _dashboardUrl;
     private volatile bool _micMuted;
     private DispatcherTimer? _heartbeatTimer;
+    private DispatcherTimer? _callTimer;
+    private TimeSpan _callDuration;
     private const int HotkeyPtt = 1, HotkeyMute = 2, HotkeyWake = 3;
 
     public MainWindow()
@@ -86,14 +86,95 @@ public sealed partial class MainWindow : Window
         AppLog.SetVerbosity(_settings.LogLevel);
         _memory = new MemoryStore();
         _brain = new Brain(_settings, _memory);
+        _outreach = new Outreach(_settings);
+        _outreach.RegisterSmsSender((number, text) => _brain.SendSms(number, text));
         _sm = new AssistantStateMachine(_settings);
         _gemini = new GeminiBackend();
+        _gemini.TelegramOptions = new TelegramCallOptions(
+            _settings.TelegramApiId, _settings.TelegramApiHash,
+            _settings.TelegramPhone, _settings.TelegramCallEnabled,
+            _settings.TelegramCallTarget);
         _gemini.StatusChanged += OnGeminiStatusChanged;
         _gemini.TranscriptReceived += OnGeminiTranscript;
         _gemini.ToolCallReceived += OnGeminiToolCall;
         _gemini.ComputerActRequested += OnComputerActRequested;
         _gemini.ErrorOccurred += OnGeminiError;
         _gemini.Disconnected += OnGeminiDisconnected;
+        _gemini.ContactRequested += OnContactRequested;
+        _gemini.TelegramStatusChanged += (phase, msg, avail) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                if (phase == "connected") HideTelegramCodePanel();
+                if (_tgStatusText is not null) _tgStatusText.Text = $"[{phase.ToUpperInvariant()}]  {msg}";
+                AddMessage("system", $"Telegram: {msg}");
+            });
+        };
+        _gemini.TelegramCodeRequired += (phone, hint) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() => PromptTelegramCode(phone, hint));
+        };
+        _gemini.TelegramCodeResult += (ok, msg) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                if (ok) HideTelegramCodePanel();
+                AddMessage("system",
+                    ok ? $"Telegram code accepted — {msg}" : $"Telegram login failed: {msg}");
+            });
+        };
+        _gemini.TelegramTargetResolved += result =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                if (result.Ok)
+                {
+                    lock (_settings)
+                    {
+                        _settings.TelegramCallTarget = result.Target;
+                        _settings.TelegramCallUserId = result.UserId;
+                        _settings.Save();
+                    }
+                }
+                if (_tgStatusText is not null)
+                    _tgStatusText.Text = result.Ok
+                        ? $"Call target: {result.Target} [{result.UserId}] ({result.Name})"
+                        : $"Target resolve failed: {result.Message}";
+                AddMessage("system", result.Ok
+                    ? $"Call target resolved: {result.Target} ({result.Name})"
+                    : $"Telegram target resolve failed: {result.Message}");
+            });
+        };
+        _gemini.TelegramCallStateChanged += (state, message) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                if (_tgStatusText is not null)
+                    _tgStatusText.Text = $"[{state.ToUpperInvariant()}]  {message}";
+                AddMessage("system", $"Telegram call: {message}");
+                HandleCallStateChanged(state, message);
+            });
+        };
+        _gemini.TelegramCallResult += (ok, message) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                AddMessage("system", ok
+                    ? $"Telegram call: {message}"
+                    : $"Telegram call failed: {message}");
+            });
+        };
+        _gemini.TelegramCallFallbackSent += (source, target, reason) =>
+        {
+            _ = DispatcherQueue?.TryEnqueue(() =>
+            {
+                AddMessage("system", $"📩 Call fallback sent to {target} ({source}: {reason})");
+            });
+        };
+
+        // Stop call timer on close
+        Closed += (_, _) => _callTimer?.Stop();
+
         Closed += async (_, _) =>
         {
             Watchdog.WriteQuitFlag();
@@ -108,8 +189,9 @@ public sealed partial class MainWindow : Window
             _vad?.Dispose();
             _whisper?.Dispose();
             _memory?.Dispose();
-            _sm.Dispose();
+            _sm?.Dispose();
             _brain.Dispose();
+            _outreach?.Dispose();
         };
         _sm.StateChanged += OnStateChanged;
         _sm.MicRequested += () => SetMicVisual(true);
@@ -197,6 +279,10 @@ public sealed partial class MainWindow : Window
         _heartbeatTimer.Tick += (_, _) => Watchdog.TouchHeartbeat();
         _heartbeatTimer.Start();
 
+        // Call duration timer
+        _callTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _callTimer.Tick += (_, _) => UpdateCallDuration();
+
         // LAN web deck (QR in Setup): live read-only mirror of the conversation.
         if (_settings.WebDashboardEnabled)
         {
@@ -251,7 +337,7 @@ public sealed partial class MainWindow : Window
         try
         {
             // Gemini Live does STT+TTS+VAD server-side, so skip heavy local
-            // Whisper/VAD/Kokoro loading unless we have no Gemini key (pure local
+            // Whisper/VAD loading unless we have no Gemini key (pure local
             // mode) or Gemini later drops (lazy fallback in OnGeminiDisconnected).
             bool localMode = string.IsNullOrEmpty(_settings.GeminiApiKey);
             Dbg($"LoadModels: start (localMode={localMode})");
@@ -262,6 +348,7 @@ public sealed partial class MainWindow : Window
             else
             {
                 DispatcherQueue.TryEnqueue(() => TickerText.Text = "CORE STATUS: GEMINI MODE (local STT/TTS skipped)");
+                _ = EnsureVadAsync();
             }
 
             // Start Gemini backend
@@ -317,14 +404,28 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async Task EnsureVadAsync()
+    {
+        try
+        {
+            if (_repo.Has("silero-vad.onnx")) return;
+            Dbg("LoadModels: downloading silero VAD gate");
+            DispatcherQueue.TryEnqueue(() => TickerText.Text = "DOWNLOAD: silero-vad.onnx (voice gate)");
+            await _repo.EnsureAsync("silero-vad.onnx");
+            Dbg("LoadModels: silero VAD ready");
+        }
+        catch (Exception ex)
+        {
+            Dbg("LoadModels: VAD download failed, will stream raw mic: " + ex.Message);
+        }
+    }
+
     private static readonly string[] EnvModelKeys =
     [
         "whisper-encoder.onnx",
         "whisper-decoder.onnx",
         "whisper-tokenizer.json",
         "silero-vad.onnx",
-        "kokoro-v1.0.int8.onnx",
-        "kokoro-voices-v1.0.bin",
     ];
 
     /// <summary>Locate a real CPython with the Gemini SDK (mirrors GeminiBackend.FindPython).</summary>
@@ -377,17 +478,15 @@ public sealed partial class MainWindow : Window
                     var dir = _repo.Dir;
                     var whisperTask = Task.Run(() => { var w = new WhisperStt(); w.Load(dir); return w; });
                     var vadTask = Task.Run(() => new SileroVad(_repo.PathFor("silero-vad.onnx")));
-                    var kokoroTask = Task.Run(() => { var k = new KokoroTts(); k.Load(dir, _settings); return k; });
-                    await Task.WhenAll(whisperTask, vadTask, kokoroTask);
+                    await Task.WhenAll(whisperTask, vadTask);
                     _whisper = await whisperTask;
                     _vad = await vadTask;
-                    _kokoro = await kokoroTask;
                     _modelsLoaded = true;
                     Dbg("LoadModels: ensure local models done");
                     DispatcherQueue.TryEnqueue(() =>
                     {
                         TickerText.Text = "CORE STATUS: ALL MODELS LOADED";
-                        AddMessage("system", "ONLINE — Whisper STT + Silero VAD + Kokoro TTS ready.");
+                        AddMessage("system", "ONLINE — Whisper STT + Silero VAD ready.");
                     });
                 }
                 catch (Exception ex)
@@ -486,6 +585,117 @@ public sealed partial class MainWindow : Window
         portBox.TextChanged += (_, _) => RefreshQr();
         RefreshQr();
 
+        // ---------- TELEGRAM VOICE CALLS ----------
+        var tgMuted = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171));
+        var tgAccent = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 242, 201, 76));
+        var tgToggle = new ToggleSwitch { Header = "Enable Telegram voice calling", IsOn = _settings.TelegramCallEnabled };
+        var tgApiId = new TextBox { Text = _settings.TelegramApiId, Width = 360, PlaceholderText = "e.g. 12345678" };
+        var tgApiHash = new PasswordBox { Width = 360, Password = _settings.TelegramApiHash };
+        var tgPhone = new TextBox { Text = _settings.TelegramPhone, Width = 360, PlaceholderText = "+15551234567 (ULTRON account)" };
+        _tgStatusText = new TextBlock
+        {
+            FontFamily = font,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = tgMuted,
+            Text = _settings.TelegramCallEnabled ? "Status unknown — connect or restart to check the session." : "Telegram calling is off.",
+        };
+        var tgConnect = new Button { Content = "Connect", Padding = new Thickness(8, 6, 8, 6) };
+        var tgLogout = new Button { Content = "Logout", Padding = new Thickness(8, 6, 8, 6) };
+        var tgTarget = new TextBox { Text = _settings.TelegramCallTarget, Width = 360, PlaceholderText = "@yourusername or phone to call" };
+        var tgResolve = new Button { Content = "Resolve Target", Padding = new Thickness(8, 6, 8, 6) };
+        var tgFallbackEnabled = new ToggleSwitch { Header = "Enable call fallback messaging", IsOn = _settings.CallFallbackEnabled };
+        var tgFallbackThreshold = new TextBox { Text = _settings.CallFallbackThresholdSeconds.ToString(), Width = 80, PlaceholderText = "5" };
+        var tgFallbackChatId = new TextBox { Text = _settings.CallFallbackChatId, Width = 200, PlaceholderText = "@username or chat ID" };
+        var tgHint = new TextBlock
+        {
+            FontFamily = font,
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = tgMuted,
+            Text = "How to get credentials: sign in on my.telegram.org with the ULTRON account's phone " +
+                   "number, open ‘API development tools’, and copy the api_id and api_hash below. " +
+                   "This dedicated account is what places (and later answers) the voice call. " +
+                   "Credentials are stored encrypted with your Windows login, same as the Gemini key.",
+        };
+        tgConnect.Click += async (_, _) =>
+        {
+            var id = tgApiId.Text.Trim();
+            var hash = tgApiHash.Password.Trim();
+            var phone = tgPhone.Text.Trim();
+            if (id.Length == 0 || hash.Length == 0)
+            {
+                _tgStatusText.Text = "Enter api_id and api_hash before connecting.";
+                _tgStatusText.Foreground = tgAccent;
+                return;
+            }
+            lock (_settings)
+            {
+                _settings.TelegramApiId = id;
+                _settings.TelegramApiHash = hash;
+                _settings.TelegramPhone = phone;
+                _settings.TelegramCallEnabled = tgToggle.IsOn;
+                _settings.Save();
+            }
+            _gemini.TelegramOptions = new TelegramCallOptions(id, hash, phone, tgToggle.IsOn, tgTarget.Text.Trim());
+            _tgStatusText.Text = "Connecting to Telegram…";
+            _tgStatusText.Foreground = tgMuted;
+            await _gemini.SendTelegramLoginAsync(phone, id, hash);
+        };
+        tgResolve.Click += async (_, _) =>
+        {
+            var target = tgTarget.Text.Trim();
+            if (target.Length == 0)
+            {
+                _tgStatusText.Text = "Enter a call target first.";
+                _tgStatusText.Foreground = tgAccent;
+                return;
+            }
+            lock (_settings)
+            {
+                _settings.TelegramCallTarget = target;
+                _settings.Save();
+            }
+            _tgStatusText.Text = $"Resolving {target}…";
+            _tgStatusText.Foreground = tgMuted;
+            await _gemini.SendTelegramResolveTargetAsync(target);
+        };
+        
+        // Test Call button - find it in the dialog and add click handler
+        // We'll add it after the dialog is created
+        // (handled via the dialog's content tree)
+
+        tgLogout.Click += async (_, _) =>
+        {
+            _tgStatusText.Text = "Logging out of Telegram…";
+            _tgStatusText.Foreground = tgMuted;
+            await _gemini.SendTelegramLogoutAsync();
+        };
+
+        var tgCodePanel = new StackPanel { Spacing = 8, Visibility = Visibility.Collapsed };
+        var tgCodeBox = new TextBox { PlaceholderText = "Login code (or 2FA password)", Width = 360 };
+        var tgCodeSubmit = new Button
+        {
+            Content = "Submit Code",
+            Padding = new Thickness(8, 6, 8, 6),
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        tgCodeSubmit.Click += async (_, _) =>
+        {
+            var code = tgCodeBox.Text.Trim();
+            if (code.Length == 0) return;
+            tgCodeSubmit.IsEnabled = false;
+            if (_tgStatusText is not null) _tgStatusText.Text = "Submitting code…";
+            await _gemini.SendTelegramCodeAsync(code);
+            tgCodeSubmit.IsEnabled = true;
+            tgCodeBox.Text = "";
+        };
+        tgCodePanel.Children.Add(Lbl("Enter the login code Telegram sent (check the ULTRON account):"));
+        tgCodePanel.Children.Add(tgCodeBox);
+        tgCodePanel.Children.Add(tgCodeSubmit);
+        _tgCodePanel = tgCodePanel;
+        _tgCodeBox = tgCodeBox;
+
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -515,6 +725,42 @@ public sealed partial class MainWindow : Window
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Port  ", 11), portBox } },
                         qrImage,
                         qrUrl,
+                        Lbl("TELEGRAM VOICE CALLS — real phone calls from the ULTRON account:"),
+                        tgToggle,
+                        Lbl("api_id (your ULTRON app's id at my.telegram.org):"),
+                        tgApiId,
+                        Lbl("api_hash (shown once at my.telegram.org):"),
+                        tgApiHash,
+                        Lbl("ULTRON account phone number (calls come from this):"),
+                        tgPhone,
+                        tgHint,
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { tgConnect, tgLogout } },
+                        _tgStatusText,
+                        Lbl("Call target (the Telegram account that should be called):"),
+                        tgTarget,
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { tgResolve } },
+                        tgCodePanel,
+
+                        // Test Call button
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = {
+                            Lbl("Test Call:", 11),
+                            new Button { Content = "📞 Test Call", Padding = new Thickness(12, 6, 12, 6),
+                                Background = new SolidColorBrush(Microsoft.UI.Colors.DarkGreen), Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
+                                CornerRadius = new CornerRadius(6), FontFamily = font, FontSize = 11 }
+                        }},
+
+                        // Call fallback settings
+                        Lbl("CALL FALLBACK — send Telegram message if call unanswered or hung up immediately:"),
+                        new ToggleSwitch { Header = "Enable call fallback messaging", IsOn = _settings.CallFallbackEnabled },
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = {
+                            Lbl("Hangup threshold (seconds):", 11),
+                            new TextBox { Text = _settings.CallFallbackThresholdSeconds.ToString(), Width = 80, PlaceholderText = "5" }
+                        }},
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = {
+                            Lbl("Fallback chat ID (optional override):", 11),
+                            new TextBox { Text = _settings.CallFallbackChatId, Width = 200, PlaceholderText = "@username or chat ID" }
+                        }},
+
                         Lbl("PRIVACY:"),
                         memoryToggle,
                         purgeBtn,
@@ -530,6 +776,14 @@ public sealed partial class MainWindow : Window
             lock (_settings)
             {
                 _settings.MemoryLogging = memoryToggle.IsOn;
+                _settings.TelegramCallEnabled = tgToggle.IsOn;
+                _settings.CallFallbackEnabled = tgFallbackEnabled.IsOn;
+                int.TryParse(tgFallbackThreshold.Text.Trim(), out var fbThr);
+                if (fbThr > 0) _settings.CallFallbackThresholdSeconds = fbThr;
+                _settings.CallFallbackChatId = tgFallbackChatId.Text.Trim();
+                if (tgApiId.Text.Trim().Length > 0) _settings.TelegramApiId = tgApiId.Text.Trim();
+                if (tgApiHash.Password.Trim().Length > 0) _settings.TelegramApiHash = tgApiHash.Password.Trim();
+                if (tgPhone.Text.Trim().Length > 0) _settings.TelegramPhone = tgPhone.Text.Trim();
                 if (!string.IsNullOrEmpty(key))
                 {
                     _settings.GeminiApiKey = key;
@@ -582,7 +836,94 @@ public sealed partial class MainWindow : Window
             else
                 AddMessage("system", "Settings saved.");
         };
-        await dialog.ShowAsync();
+        try
+        {
+            // Wire up Test Call button after dialog content is set
+            if (dialog.Content is ScrollViewer sv && sv.Content is StackPanel sp)
+            {
+                foreach (var child in sp.Children)
+                {
+                    if (child is StackPanel testPanel && testPanel.Orientation == Orientation.Horizontal)
+                    {
+                        foreach (var tc in testPanel.Children)
+                        {
+                            if (tc is Button btn && btn.Content?.ToString()?.Contains("Test Call") == true)
+                            {
+                                btn.Click += async (_, _) => await _gemini.SendTelegramCallStartAsync();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            _tgStatusText = null;
+            _tgCodePanel = null;
+            _tgCodeBox = null;
+        }
+    }
+
+    /// <summary>Collapse + release the inline code entry controls (called after a
+    /// successful login, or when settings closes).</summary>
+    private void HideTelegramCodePanel()
+    {
+        if (_tgCodePanel is not null) _tgCodePanel.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>Ask the user for the Telegram login code (or 2FA password) that
+    /// arrived on the ULTRON account, then forward it to the backend. When the
+    /// settings dialog is open the entry appears inline in it; otherwise a
+    /// standalone dialog is used.</summary>
+    private void PromptTelegramCode(string phone, string hint)
+    {
+        try
+        {
+            if (_tgCodePanel is not null)
+            {
+                _tgCodeBox!.Text = "";
+                _tgCodePanel.Visibility = Visibility.Visible;
+                _tgCodeBox.Focus(FocusState.Programmatic);
+                if (_tgStatusText is not null) _tgStatusText.Text = $"Enter the Telegram code sent to {phone}.";
+                return;
+            }
+            var codeBox = new TextBox { PlaceholderText = "Login code", Width = 300 };
+            var dlg = new ContentDialog
+            {
+                XamlRoot = Content?.XamlRoot,
+                Title = "TELEGRAM LOGIN",
+                Content = new StackPanel
+                {
+                    Spacing = 8,
+                    Children =
+                    {
+                        new TextBlock { Text = $"Enter the Telegram login code for {phone}.", TextWrapping = TextWrapping.Wrap },
+                        new TextBlock { Text = hint, FontSize = 11, Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
+                        codeBox,
+                    },
+                },
+                PrimaryButtonText = "Submit",
+                CloseButtonText = "Cancel",
+            };
+            if (dlg.XamlRoot == null)
+            {
+                AddMessage("system", $"Telegram needs a login code: {hint}");
+                return;
+            }
+            _ = dlg.ShowAsync().AsTask().ContinueWith(async t =>
+            {
+                if (t.IsCompletedSuccessfully && t.Result == ContentDialogResult.Primary && codeBox.Text.Trim().Length > 0)
+                    await _gemini.SendTelegramCodeAsync(codeBox.Text.Trim());
+            }, System.Threading.Tasks.TaskScheduler.Default);
+        }
+        catch (Exception ex)
+        {
+            Dbg($"code prompt failed: {ex.Message}");
+            AddMessage("system", $"Telegram needs a login code: {hint}");
+        }
     }
 
     private void WireInputs()
@@ -1241,7 +1582,6 @@ public sealed partial class MainWindow : Window
                         {
                             _vadSpeaking = true;
                             _vadSilenceCount = 0;
-                            StopSpeech(bargeIn: true);
                             DispatcherQueue.TryEnqueue(() =>
                             {
                                 OrbContainer.Fill = BrushFromHex("#66FFB703");
@@ -1333,7 +1673,6 @@ public sealed partial class MainWindow : Window
             {
                 var reply = await _brain.AskAsync(text, chunk =>
                 {
-                    StreamSpeechChunk(chunk);
                     if (replyBox.Children[1] is TextBlock tb)
                         DispatcherQueue.TryEnqueue(() => tb.Text += chunk);
                 });
@@ -1341,7 +1680,6 @@ public sealed partial class MainWindow : Window
                 if (replyBox.Children[1] is TextBlock tb2 && string.IsNullOrEmpty(tb2.Text))
                     tb2.Text = reply;
                 _sm.CommandFinished();
-                FlushSpeechEnd();
             }
         catch (Exception ex)
         {
@@ -1349,166 +1687,6 @@ public sealed partial class MainWindow : Window
             AddMessage("system", ex.Message);
             _sm.CommandFinished();
         }
-    }
-
-    private void StreamSpeechChunk(string delta)
-    {
-        if (_kokoro is null) return;
-        lock (_speechPending)
-        {
-            _speechPending.Append(NormalizeText(delta));
-            FlushSpeechSentences();
-        }
-    }
-
-    private static string NormalizeText(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return s;
-        var sb = new StringBuilder(s.Length);
-        foreach (var ch in s)
-        {
-            switch (ch)
-            {
-                case '\u2018': case '\u2019': case '\u201A': case '\u2032': sb.Append('\''); break;
-                case '\u201C': case '\u201D': case '\u201E': case '\u2033': case '\u00AB': case '\u00BB': sb.Append('"'); break;
-                case '\u2013': case '\u2014': case '\u2212': case '\u2015': sb.Append('-'); break;
-                case '\u2026': sb.Append("..."); break;
-                case '\uFFFD': break;
-                default: sb.Append(ch); break;
-            }
-        }
-        return sb.ToString();
-    }
-
-    private void FlushSpeechSentences()
-    {
-        var s = _speechPending.ToString();
-        while (true)
-        {
-            var idx = s.IndexOfAny(['.', '!', '?', '\n']);
-            if (idx < 0) break;
-            var sentence = s[..(idx + 1)].Trim();
-            if (!string.IsNullOrEmpty(sentence))
-                SplitLongSentence(sentence);
-            s = s[(idx + 1)..];
-        }
-        _speechPending.Clear();
-        _speechPending.Append(s);
-        if (s.Length > 600)
-        {
-            SplitLongSentence(s);
-            _speechPending.Clear();
-            _ = DrainSpeechAsync();
-        }
-    }
-
-    private void SplitLongSentence(string sentence)
-    {
-        while (sentence.Length > 120)
-        {
-            var cut = sentence.LastIndexOfAny([',', ';', ':'], 119);
-            if (cut < 60) break;
-            var clause = sentence[..(cut + 1)].Trim();
-            sentence = sentence[(cut + 1)..].TrimStart();
-            if (clause.Length > 0)
-            {
-                _speechQueue.Enqueue(clause);
-                _ = DrainSpeechAsync();
-            }
-        }
-        if (sentence.Length > 0)
-        {
-            _speechQueue.Enqueue(sentence);
-            _ = DrainSpeechAsync();
-        }
-    }
-
-    private void FlushSpeechEnd()
-    {
-        lock (_speechPending)
-        {
-            var s = _speechPending.ToString().Trim();
-            _speechPending.Clear();
-            if (s.Length > 0)
-            {
-                _speechQueue.Enqueue(s);
-                _ = DrainSpeechAsync();
-            }
-        }
-    }
-
-    private async Task DrainSpeechAsync()
-    {
-        if (!await _speechGate.WaitAsync(0)) return;
-        _speechInterrupt = false;
-        try
-        {
-            while (_speechQueue.TryDequeue(out var sentence))
-            {
-                var pcm = await SynthesizeSpeechAsync(sentence);
-                if (pcm.Length == 0) continue;
-                var playTask = PlayPcmAsync(pcm);
-                // synthesize the queued tail while the current clip plays
-                while (_speechQueue.TryDequeue(out var next))
-                {
-                    var nextPcm = await SynthesizeSpeechAsync(next);
-                    if (nextPcm.Length == 0) continue;
-                    await playTask;
-                    playTask = PlayPcmAsync(nextPcm);
-                }
-                if (playTask != null) await playTask;
-            }
-        }
-        catch (Exception ex)
-        {
-            DispatcherQueue.TryEnqueue(() => AddMessage("system", "TTS error: " + ex.Message));
-        }
-        finally
-        {
-            _speechGate.Release();
-        }
-    }
-
-    private async Task<float[]> SynthesizeSpeechAsync(string text)
-    {
-        if (_kokoro is null) return [];
-        Dbg($"Speak: '{text}'");
-        return await Task.Run(() => _kokoro.Synthesize(NormalizeText(text)));
-    }
-
-    private async Task PlayPcmAsync(float[] pcm)
-    {
-        if (_speechInterrupt) return;
-        var shortPcm = new short[pcm.Length];
-        for (var i = 0; i < pcm.Length; i++)
-        {
-            var v = Math.Clamp(pcm[i], -1f, 1f) * 32767f;
-            shortPcm[i] = (short)v;
-        }
-        var buf = new byte[shortPcm.Length * 2];
-        Buffer.BlockCopy(shortPcm, 0, buf, 0, buf.Length);
-        var waveFormat = new WaveFormat(KokoroTts.SampleRate, 16, 1);
-        var raw = new RawSourceWaveStream(new System.IO.MemoryStream(buf, false), waveFormat);
-        var player = new WaveOut();
-        _activePlayer = player;
-        player.Init(raw);
-        player.Play();
-        while (player.PlaybackState == PlaybackState.Playing && !_speechInterrupt)
-            await Task.Delay(100);
-        if (_activePlayer == player) _activePlayer = null;
-        player.Stop();
-        player.Dispose();
-        raw.Dispose();
-    }
-
-    private void StopSpeech(bool bargeIn = false)
-    {
-        if (bargeIn) _speechInterrupt = true;
-        var p = _activePlayer;
-        _activePlayer = null;
-        p?.Stop();
-        p?.Dispose();
-        while (_speechQueue.TryDequeue(out _)) { }
     }
 
     private void OnAudioLevel(float level)
@@ -1822,7 +2000,6 @@ public sealed partial class MainWindow : Window
         {
             var reply = await _brain.AskAsync(text, chunk =>
             {
-                StreamSpeechChunk(chunk);
                 if (replyBox.Children[1] is TextBlock tb)
                 {
                     DispatcherQueue.TryEnqueue(() => tb.Text += chunk);
@@ -1833,7 +2010,6 @@ public sealed partial class MainWindow : Window
                 tb2.Text = reply;
             }
             _sm.CommandFinished();
-            FlushSpeechEnd();
         }
         catch (Exception ex)
         {
@@ -2197,6 +2373,97 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    private void HandleCallStateChanged(string state, string message)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (CallStatusOverlay is null) return;
+
+            switch (state.ToLowerInvariant())
+            {
+                case "ringing":
+                    CallStatusOverlay.Visibility = Visibility.Visible;
+                    CallStatusText.Text = "RINGING";
+                    CallTargetText.Text = message;
+                    CallDurationText.Text = "00:00";
+                    _callDuration = TimeSpan.Zero;
+                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Orange);
+                    CallHangupButton.Visibility = Visibility.Visible;
+                    CallAcceptButton.Visibility = Visibility.Collapsed;
+                    CallDeclineButton.Visibility = Visibility.Collapsed;
+                    _callTimer?.Start();
+                    break;
+
+                case "connecting":
+                    CallStatusText.Text = "CONNECTING";
+                    CallTargetText.Text = message;
+                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Orange);
+                    break;
+
+                case "connected":
+                    CallStatusText.Text = "CONNECTED";
+                    CallTargetText.Text = message;
+                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.LimeGreen);
+                    CallAcceptButton.Visibility = Visibility.Collapsed;
+                    CallDeclineButton.Visibility = Visibility.Collapsed;
+                    break;
+
+                case "remote_speech":
+                    if (message == "started")
+                        CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Cyan);
+                    else
+                        CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.LimeGreen);
+                    break;
+
+                case "ended":
+                case "error":
+                    CallStatusText.Text = state.ToUpperInvariant();
+                    CallTargetText.Text = message;
+                    CallStatusDot.Fill = new SolidColorBrush(state == "error" ? Microsoft.UI.Colors.Red : Microsoft.UI.Colors.Gray);
+                    CallHangupButton.Visibility = Visibility.Collapsed;
+                    _callTimer?.Stop();
+                    // Auto-hide after 5 seconds
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(5000);
+                        DispatcherQueue.TryEnqueue(() =>
+                        {
+                            if (CallStatusOverlay is not null)
+                                CallStatusOverlay.Visibility = Visibility.Collapsed;
+                        });
+                    });
+                    break;
+            }
+        });
+    }
+
+    private void UpdateCallDuration()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _callDuration = _callDuration.Add(TimeSpan.FromSeconds(1));
+            var mins = _callDuration.Minutes;
+            var secs = _callDuration.Seconds;
+            if (CallDurationText is not null)
+                CallDurationText.Text = $"{mins:D2}:{secs:D2}";
+        });
+    }
+
+    private void CallHangupButton_Click(object sender, RoutedEventArgs e)
+    {
+        _ = _gemini.SendTelegramCallStopAsync();
+    }
+
+    private void CallAcceptButton_Click(object sender, RoutedEventArgs e)
+    {
+        // For incoming calls (not implemented yet - we only do outgoing)
+    }
+
+    private void CallDeclineButton_Click(object sender, RoutedEventArgs e)
+    {
+        _ = _gemini.SendTelegramCallStopAsync();
+    }
+
     private async Task<string> ExecuteGeminiToolAsync(GeminiToolCall call)
     {
         switch (call.Name)
@@ -2217,6 +2484,7 @@ public sealed partial class MainWindow : Window
             case "window_manage": return HandleWindowManage(call.Args);
             case "code_helper": return HandleCodeHelper(call.Args);
             case "send_message": return HandleSendMessage(call.Args);
+            case "set_away_mode": return HandleSetAway(call.Args);
             case "youtube_video": return HandleYouTubeVideo(call.Args);
             case "screen_process": return "Vision handled by the backend.";
             case "close_camera": return "Camera closed.";
@@ -3371,6 +3639,38 @@ var (v, m) = before;
         var text = args.GetValueOrDefault("message_text")?.ToString() ?? "";
         var platform = args.GetValueOrDefault("platform")?.ToString() ?? "sms";
         return $"Message to {receiver} via {platform}: \"{text}\". (Phone messaging requires ADB connection — use phone_* tools instead.)";
+    }
+
+    private string HandleSetAway(Dictionary<string, object> args)
+    {
+        var action = args.GetValueOrDefault("action")?.ToString()?.ToLowerInvariant() ?? "on";
+        var on = action is not ("off" or "false" or "0" or "disable");
+        _settings.AwayMode = on;
+        _settings.Save();
+        _ = _gemini.SetAwayAsync(on);
+        Dbg($"Away mode set to {on}.");
+        return on
+            ? "Away mode is ON. I will watch your system and message you with anything important."
+            : "Away mode is OFF. I am back to speaking alerts here.";
+    }
+
+    private void OnContactRequested(ContactRequest req)
+    {
+        Dbg($"Contact requested [{req.Area}/{req.Priority}]: {AppLog.Redact(req.Text)}");
+        _ = RouteContactAsync(req);
+    }
+
+    private async Task RouteContactAsync(ContactRequest req)
+    {
+        try
+        {
+            var result = await _outreach.SendAsync(req.Text, req.Area, req.Priority);
+            LogEnqueued("system", $"Contact [{req.Area}]: {result}");
+        }
+        catch (Exception ex)
+        {
+            Dbg($"Contact routing failed: {ex.Message}");
+        }
     }
 
     private string HandleYouTubeVideo(Dictionary<string, object> args)

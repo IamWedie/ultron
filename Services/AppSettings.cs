@@ -16,8 +16,6 @@ public sealed class AppSettings
     public string PrimaryModel { get; set; } = "gemini-2.5-flash-native-audio-preview-12-2025";
     public List<string> FallbackModels { get; set; } = [];
     public string GeminiVoice { get; set; } = "Charon";
-    public string TtsVoice { get; set; } = "bm_lewis";
-    public string TtsRate { get; set; } = "+30%";
     public string PinHash { get; set; } = "";
     public bool VoiceEnrolled { get; set; }
     public string VoiceProfile { get; set; } = "";
@@ -58,7 +56,36 @@ public sealed class AppSettings
     // Log verbosity: "Error", "Warn", "Info", "Debug". Everything below is filtered out.
     public string LogLevel { get; set; } = "Info";
 
-    public static AppSettings Load()
+    public bool AwayMode { get; set; }
+    public string NotifyChannel { get; set; } = "telegram"; // telegram | sms | none
+    public string NotifyNumber { get; set; } = "";
+    public bool NotifyAtHome { get; set; }
+    public string TelegramBotToken { get; set; } = "";
+    public string TelegramChatId { get; set; } = "";
+
+    // Telegram voice-call account (dedicated ULTRON user account, MTProto).
+    public bool TelegramCallEnabled { get; set; }      // off by default: no impact on existing behavior
+    public string TelegramApiId { get; set; } = "";
+    public string TelegramApiHash { get; set; } = "";
+    public string TelegramPhone { get; set; } = "";
+    // Call target (@username or phone). The numeric TelegramCallUserId is cached
+    // after the first successful resolution so later calls skip re-resolution.
+    public string TelegramCallTarget { get; set; } = "";
+    public string TelegramCallUserId { get; set; } = "";
+
+    // Call fallback messaging: if a call goes unanswered or is hung up immediately,
+    // send the payload as a Telegram message from the ULTRON account.
+    public bool CallFallbackEnabled { get; set; } = true;  // on by default
+    public int CallFallbackThresholdSeconds { get; set; } = 5;  // max duration for "immediate hangup"
+    public string CallFallbackChatId { get; set; } = "";  // optional override target
+
+    public bool NotifyGuardian { get; set; } = true;
+    public bool NotifyReminders { get; set; } = true;
+    public bool NotifyMonitor { get; set; } = true;
+    public bool NotifyAwayActivity { get; set; } = true;
+    public bool NotifyMissions { get; set; } = true;
+
+public static AppSettings Load()
     {
         try
         {
@@ -72,6 +99,26 @@ public sealed class AppSettings
                                   s.ZenApiKey.Trim();
                     s.GeminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY")?.Trim() ??
                                      s.GeminiApiKey.Trim();
+                    s.TelegramBotToken = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TOKEN")?.Trim() ??
+                                         s.TelegramBotToken.Trim();
+                    s.TelegramChatId = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_CHAT")?.Trim() ??
+                                       s.TelegramChatId.Trim();
+                    s.TelegramApiId = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_API_ID")?.Trim() ??
+                                      s.TelegramApiId.Trim();
+                    s.TelegramApiHash = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_API_HASH")?.Trim() ??
+                                        s.TelegramApiHash.Trim();
+                    s.TelegramPhone = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_PHONE")?.Trim() ??
+                                      s.TelegramPhone.Trim();
+                    s.TelegramCallTarget = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TARGET")?.Trim() ??
+                                           s.TelegramCallTarget.Trim();
+                    s.TelegramCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED") is { } evCall
+                                        && evCall.Trim() is "1" or "true";
+                    s.CallFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED") is { } evFb
+                                        && evFb.Trim() is "1" or "true";
+                    int.TryParse(Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_THRESHOLD"), out var thr);
+                    if (thr > 0) s.CallFallbackThresholdSeconds = thr;
+                    s.CallFallbackChatId = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_CHAT_ID")?.Trim() ??
+                                          s.CallFallbackChatId.Trim();
                     return s;
                 }
             }
@@ -80,6 +127,19 @@ public sealed class AppSettings
         var fresh = new AppSettings();
         fresh.ZenApiKey = Environment.GetEnvironmentVariable("ZEN_API_KEY")?.Trim() ?? "";
         fresh.GeminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY")?.Trim() ?? "";
+        fresh.TelegramBotToken = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TOKEN")?.Trim() ?? "";
+        fresh.TelegramChatId = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_CHAT")?.Trim() ?? "";
+        fresh.TelegramApiId = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_API_ID")?.Trim() ?? "";
+        fresh.TelegramApiHash = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_API_HASH")?.Trim() ?? "";
+        fresh.TelegramPhone = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_PHONE")?.Trim() ?? "";
+        fresh.TelegramCallTarget = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TARGET")?.Trim() ?? "";
+        fresh.TelegramCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED") is { } evC
+                                    && evC.Trim() is "1" or "true";
+        fresh.CallFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED") is { } evFb2
+                                    && evFb2.Trim() is "1" or "true";
+        int.TryParse(Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_THRESHOLD"), out var thr2);
+        if (thr2 > 0) fresh.CallFallbackThresholdSeconds = thr2;
+        fresh.CallFallbackChatId = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_CHAT_ID")?.Trim() ?? "";
         return fresh;
     }
 
