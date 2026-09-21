@@ -732,8 +732,8 @@ class TelegramController:
                 [accepted_task, discarded_task, timeout_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            for t in pending:
-                t.cancel()
+            for task in pending:
+                task.cancel()
 
             if discarded_task in done:
                 await self._call_emit_state("ended", "Call declined by peer")
@@ -861,10 +861,10 @@ class TelegramController:
             )
             
             # Cancel pending tasks
-            for t in pending:
-                t.cancel()
+            for task in pending:
+                task.cancel()
                 try:
-                    await t
+                    await task
                 except asyncio.CancelledError:
                     pass
             

@@ -1,6 +1,6 @@
-# UltronEvolved — Full System Architecture Walkthrough
+# ULTRON Voice Assistant (Windows Desktop) — System Architecture
 
-This document provides a complete walkthrough of the UltronEvolved system architecture as of September 2026, covering both the ULTRON voice assistant (Windows desktop) and the primavera Canva-like design app (Linux/GTK4 + Wayland).
+This document provides a complete walkthrough of the ULTRON voice assistant system architecture as of September 2026.
 
 ---
 
@@ -73,77 +73,7 @@ Task inbox overdue → guardian loop → same _speak_unsolicited path
 
 ---
 
-## 2. Primavera — Canva-like Design App (Linux, GTK4 + Wayland)
-
-### 2.1 Target Environment
-- **OS**: Debian/Ubuntu on bare metal
-- **Compositor**: Wayfire (wlroots-based, Compiz-like 3D effects, XWayland support)
-- **Shell**: wf-shell (GNOME-like panel + taskbar) or GNOME Shell over XWayland for settings
-- **GTK**: 4.0 (Wayland-native, client-side decorations)
-- **XWayland**: for legacy apps (gnome-control-center, etc.); Wayfire spawns Xwayland automatically and exposes it as XServer1
-
-### 2.2 Wayland Integration
-- **Xwayland-shell-v1 protocol**: allows Xwayland server to associate X11 windows with wl_surface — handles seamless XWayland↔Wayland window management.
-- **Client shell** (Wayfire config): `wf-shell` provides panel, taskbar, app launcher; custom CSS theme for round corners and dark mode. Layer effects for blur/shadows.
-- **XWayland gateway** (alpha/primavera config): Wayfire's XWayland instance with XServer1 display `:0`, rootful for X11 apps that need it (e.g. GIMP if needed). Environment: `DISPLAY=:0` for XWayland apps.
-- **GNOME Settings via XWayland**: `export DISPLAY=:0 && gnome-control-center` runs the full GNOME control center in an XWayland window — settings accessible through Wayfire panel.
-
-### 2.3 App Architecture (GTK4 + pygobject)
-```
-primavera/
-├── main.py                  # GtkApplication entry point
-├── app_window.py            # GtkApplicationWindow — canvas + sidebar
-├── canvas.py                # GtkDrawingArea + GskRenderNode tree
-├── tool_palette.py          # Sidebar: shapes, text, images, brushes
-├── layers_panel.py          # Layer list, reorder, lock, visibility
-├── property_inspector.py    # Properties panel for selected element
-├── file_operations.py       # Open/save/export (PDF, PNG, SVG)
-├── history.py               # Undo/redo stack
-├── style.css                # GTK4 CSS for dark theme + round corners
-└── wayland/
-    ├── __init__.py
-    ├── client_shell.py      # wl_surface + xdg_surface integration
-    └── xwayland_gateway.py  # Xwayland-shell-v1 protocol bridge
-```
-
-**Key design decisions**:
-- Canvas uses GTK4's `Gtk.DrawingArea` with `snapshot.render_layout()` for vector rendering.
-- Each element (shape, text, image) is a dataclass with bounding box, rotation, style props — serialized to/from JSON project files.
-- Wayland client shell integration via `Gtk4WaylandClient` — the app is a native Wayland client, no XWayland needed for the design app itself (pure Wayland). XWayland is only for auxiliary GNOME settings.
-- Dark theme via CSS override directory + `prefers-color-scheme: dark`.
-
-### 2.4 Wayfire Configuration for Primavera
-```ini
-# ~/.config/wayfire/wayfire.ini
-[core]
-plugins = wf-shell pixdecor
-xwayland = true
-xwayland_mode = rootless
-
-[desktop]
-blur = true
-blur_radius = 5
-corner_radius = 12
-
-[autostart]
-# Start GNOME settings via XWayland for system prefs
-gnome-settings = sh -c "sleep 2 && dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY && gnome-settings-daemon"
-panel = wf-panel
-launcher = wlr-taskbar
-```
-
----
-
-## 3. Cross-System Integration (Windows ↔ Linux)
-
-The ULTRON voice assistant (Windows) can interact with the primavera design app (Linux) via network:
-- `waypipe` allows remote Wayland app execution over SSH.
-- `SSH tunnel` for file transfer and command execution.
-- ULTRON's `computer_use` agent can SSH into the Linux box and drive Wayfire via `wf-message` IPC or direct keyboard simulation.
-
----
-
-## 4. Build & Deploy Status
+## 2. Build & Deploy Status
 | Component | Status |
 |-----------|--------|
 | ULTRON C# shell | ✅ WinUI 3, build clean (0 errors) |
@@ -155,15 +85,11 @@ The ULTRON voice assistant (Windows) can interact with the primavera design app 
 | Productivity | ✅ Word/Excel/PPTX generation + persistent task inbox |
 | Live vision | ✅ Ambient webcam capture per user exchange |
 | Full keyboard/media | ✅ Media keys + window manage actions |
-| Primavera app | 🔨 Scaffolded, to be built on Linux machine |
-| Wayland config | 🔨 Documented, ready to deploy on Debian box |
 
 ---
 
-## 5. Next Steps
+## 3. Next Steps
 1. **Test all ULTRON features by voice** (user plans to do when noise is low).
-2. **Deploy Wayfire config** to Debian box and verify XWayland + GNOME settings.
-3. **Build primavera GTK4 app** on Linux with the scaffolded code.
-4. **Network bridge**: SSH/waypipe connection from ULTRON Windows → primavera Linux.
-5. **Audio environment hooks**: canberra-gtk-play for start/stop/error sounds (Wayfire side).
-6. **Live vision integration with primavera**: ULTRON camera frames → primavera as reference image.
+2. **Fix remaining correctness issues** (call path, approval gates, IPC hardening).
+3. **Add Python CI** (compileall, pyflakes, requirements.txt).
+5. **Hardening** (approval gates, phone tool lockdown, DashboardServer localhost-only).

@@ -55,7 +55,6 @@ except ImportError:
 # --- Mark-LII tool ports (Python side) ---
 import monitor as monitor_store
 import tools_extra
-import dev_agent
 import computer_use
 import guardian
 import productivity
@@ -507,29 +506,6 @@ TOOL_DECLARATIONS = [
             },
             "required": ["action"],
         },
-    },
-    {
-        "name": "dev_agent",
-        "description": (
-            "Scaffold, run and fix a small software project from a plain-English description "
-            "(e.g. 'a python script that renames all jpg files in a folder by date'). Write the "
-            "project to the user's Desktop\\dev_projects, run it once, and fix it if it crashes. "
-            "Only the final summary is spoken; tell the user the project folder."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "task": {"type": "STRING", "description": "What to build, in plain language"},
-                "name": {"type": "STRING", "description": "Optional project folder name (default 'app')"},
-                "language": {"type": "STRING", "description": "Optional language preference (e.g. python, nodejs)"},
-            },
-            "required": ["task"],
-        },
-    },
-    {
-        "name": "game_updater",
-        "description": "Scan the PC for installed games (Steam, Epic, Battle.net, GOG folders) and report them with sizes.",
-        "parameters": {"type": "OBJECT", "properties": {}},
     },
     {
         "name": "flight_finder",
@@ -1140,16 +1116,6 @@ class GeminiSession:
             return await self._monitor_check_once() or "Nothing due right now."
         return "Use action = start, stop, or check_now."
 
-    async def _handle_dev_agent(self, args: dict) -> str:
-        task = str(args.get("task", "")).strip()
-        if not task:
-            return "No task description given."
-        name = str(args.get("name", "") or "app").strip()
-        lang = str(args.get("language", "") or "").strip()
-        if lang:
-            task = f"Language: {lang}. " + task
-        return await asyncio.to_thread(dev_agent.run_dev_agent, self.client, task, name)
-
     def _handle_flight_finder(self, args: dict) -> str:
         origin = str(args.get("origin", "") or "?").strip()
         destination = str(args.get("destination", "") or "?").strip()
@@ -1301,7 +1267,13 @@ class GeminiSession:
         the guardian so alerts are actually heard."""
         if self.session is None:
             return
-        await self.session.send_text(f"SYSTEM ALERT, act on it briefly and speak one or two concise lines: {text}")
+        try:
+            await self.session.send_client_content(
+                turns={"parts": [{"text": f"SYSTEM ALERT, act on it briefly and speak one or two concise lines: {text}"}]},
+                turn_complete=True,
+            )
+        except Exception as e:
+            print(f"[Guardian] Failed to send alert: {e}", file=sys.stderr)
 
     def _emit_contact(self, text: str, area: str = "guardian", priority: str = "normal"):
         """Forward an outbound notification to the shell (C#) so it can reach
@@ -1616,10 +1588,8 @@ class GeminiSession:
                                 result = self._handle_manage_monitor(args)
                             elif fc.name == "background_monitor":
                                 result = await self._handle_background_monitor(args)
-                            elif fc.name == "dev_agent":
-                                result = await self._handle_dev_agent(args)
-                            elif fc.name == "game_updater":
-                                result = await asyncio.to_thread(tools_extra.scan_games)
+                            elif fc.name == "flight_finder":
+                                result = self._handle_flight_finder(args)
                             elif fc.name == "audio_devices_list":
                                 result = await asyncio.to_thread(tools_extra.list_input_devices)
                             elif fc.name == "computer_use":
