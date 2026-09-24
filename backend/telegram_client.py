@@ -23,6 +23,13 @@ import time
 import traceback
 from typing import Awaitable, Callable, Optional
 
+import telethon
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.tl import functions as f, types as t
+
+import ntgcalls
+
 APP_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Ultron"
 )
@@ -597,11 +604,6 @@ class TelegramController:
 
     async def _run_call_task(self, api_id: str, api_hash: str, session: str, target: str) -> None:
         """Background task that runs the full call flow with fallback messaging."""
-        import telethon
-        from telethon import TelegramClient, events
-        from telethon.sessions import StringSession
-        from telethon.tl import functions as f, types as t
-
         import ntgcalls
         import numpy as np  # noqa: F401
 

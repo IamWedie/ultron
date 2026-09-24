@@ -28,6 +28,11 @@ import time
 import traceback
 from datetime import datetime
 
+# CRITICAL: Redirect stdout to stderr IMMEDIATELY at startup.
+# This ensures stdout is used ONLY for JSON IPC messages.
+# Any print() or other output goes to stderr instead.
+sys.stdout = sys.stderr
+
 # --- google-genai imports ---
 from google import genai
 from google.genai import types
@@ -1414,12 +1419,6 @@ class GeminiSession:
                         print(f"Mic open failed on default device: {e}", file=sys.stderr)
                         new_stream = None
                 if new_stream is not None:
-                    if "stream" in locals():
-                        try:
-                            stream.stop()
-                            stream.close()
-                        except Exception:
-                            pass
                     stream = new_stream
                     print(f"Mic opened on device {self._mic_device}", file=sys.stderr)
                 current_dev = self._mic_device
