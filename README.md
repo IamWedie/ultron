@@ -27,14 +27,14 @@ ULTRON exposes 30+ tools to the model so it can actually operate the machine:
 | System | `system_status` (CPU/RAM/GPU/disk), `computer_settings` (volume, brightness, Wi-Fi, BT, shutdown/restart/sleep/lock) |
 | Screen | `screen_process` (screen/camera capture + describe), `set_live_vision` (ambient webcam context), `close_camera` |
 | Desktop | `desktop_control` (mouse move/click/scroll), `window_manage` (focus/min/max/close/tab), `type_text`, `press_key` |
-| Apps & web | `open_app`, `browser_control`, `web_search`, `youtube_video`, `weather_report`, `flight_finder` |
+| Apps & web | `open_app`, `browser_control`, `web_search`, `youtube_video`, `weather_report` |
 | Drive | `computer_use` — autonomous agent: looks at the screen, clicks/types until the task is done |
-| Keyboard in code | `code_helper` (explain/review/debug/generate), `dev_agent` (scaffold + run + fix a mini project) |
+| Keyboard in code | `code_helper` (explain/review/debug/generate) |
 | Files & docs | `file_processor` (list/read/write/search/rename/copy/delete, undoable), `create_document` (Word/Excel/PowerPoint) |
 | Memory | `save_memory`, `recall_memory` — permanent local memory (SQLite) |
 | Tasks & proactivity | `task_inbox` (persistent to-do list), `reminder`, `manage_monitor` / `background_monitor` (silent topic watch), `guardian` (spoken CPU/mem/battery alerts) |
 | Phone | `send_message` (SMS/WhatsApp/Telegram), `audio_devices_list`, `set_mic_device` |
-| Misc | `undo` (reverse last actions), `game_updater` (scan installed games), `shutdown_jarvis` (graceful exit), `set_voice` (live DSP control) |
+| Misc | `undo` (reverse last actions), `shutdown_jarvis` (graceful exit), `set_voice` (live DSP control) |
 
 ### System traits
 - **System tray companion** — minimize to tray, right-click menu, balloons, tooltips; tray icon uses a fixed GUID identity so it never ghosts after restarts.
@@ -57,7 +57,7 @@ Honest status of the rougher edges:
 | **Local STT/VAD models** | Auto-downloaded on first run; if the VAD model is missing the backend falls back to "streaming raw mic" (noise-un-gated). |
 | **Voice-ID enrollment** | Enrollment and owner gating exist in Settings; treated as experimental hardening, not a guarantee. |
 | **Web deck** | Functional but opt-in (`WebDashboardEnabled`) and still evolving. |
-| **`computer_use` / `dev_agent`** | Working but deliberately step-capped; treat as experimental autonomy — confirm before mutating actions. |
+| **`computer_use`** | Working but deliberately step-capped; treat as experimental autonomy — confirm before mutating actions. |
 | **Legacy `ZenApiKey`** | Kept only for migration; superseded by `GeminiApiKey`. |
 
 ---

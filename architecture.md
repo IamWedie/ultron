@@ -44,6 +44,8 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
   - `set_live_vision` → pass-through toggle.
   - `tool_result` → resolve `_pending_tools` future (for tools delegated from C#).
   - `computer_act_result` → resolve `_computer_act_responses` future.
+  - `telegram_call_start` / `telegram_call_stop` / `telegram_call_status` → `TelegramController` call state machine.
+  - `telegram_call_state` / `telegram_call_result` / `telegram_call_fallback_sent` events.
 
 ### 1.3 Key Files
 | File | Role |
@@ -58,6 +60,20 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
 | `backend/productivity.py` | Document builder (Word/Excel/PPTX) + persistent task inbox |
 | `backend/monitor.py` | Background topic scheduler (due timestamps, intervals) |
 | `backend/memory_store.json` | Persistent memory (user preferences, facts, people) |
+| `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
+| `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
+| `Services/SettingsDialogService.cs` | Settings dialog UI logic (extracted from MainWindow) |
+| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
+| `Services/MemoryPanelService.cs` | Memory panel UI logic (extracted from MainWindow) |
+| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
+| `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
+| `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
+| `Services/SettingsDialogService.cs` | Settings dialog UI logic (extracted from MainWindow) |
+| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
+| `Services/MemoryPanelService.cs` | Memory panel UI logic (extracted from MainWindow) |
+| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
+| `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
+| `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
 
 ### 1.4 Data Flow Summary
 ```
@@ -88,7 +104,22 @@ Task inbox overdue → guardian loop → same _speak_unsolicited path
 
 ---
 
-## 3. Next Steps
+## 2. Build & Deploy Status
+| Component | Status |
+|-----------|--------|
+| ULTRON C# shell | ✅ WinUI 3, build clean (0 errors) |
+| Python backend | ✅ All modules: gemini_backend, voice_dsp, computer_use, guardian, productivity, monitor, tools_extra |
+| Voice DSP | ✅ Vectorized, EQ-in-vocoder, no per-sample Python loops. Currently OFF (user preference) |
+| Mic robustness | ✅ Fallback to default device on bad device switch (no more PortAudioError crash) |
+| Computer-use | ✅ Autonomous engine wired, C# execute + IPC reply |
+| Guardian | ✅ CPU/memory/battery + task inbox overdue alerts |
+| Productivity | ✅ Word/Excel/PPTX generation + persistent task inbox |
+| Live vision | ✅ Ambient webcam capture per user exchange |
+| Full keyboard/media | ✅ Media keys + window manage actions |
+
+---
+
+## 2. Next Steps
 1. **Test all ULTRON features by voice** (user plans to do when noise is low).
 2. **Fix remaining correctness issues** (call path, approval gates, IPC hardening).
 3. **Add Python CI** (compileall, pyflakes, requirements.txt).

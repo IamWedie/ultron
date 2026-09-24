@@ -92,12 +92,17 @@ Data flow: `[phone mic] -> Telegram VoIP (rTCP/WebRTC) -> ULTRON Windows -> PCM 
 ### Phase 4..N — after spike (only if gate passes)
 - [x] **C7:** Outgoing call state machine via `phone.requestCall`/`accept`/`discard` + updates.
       - [x] IPC: `telegram_call_start`/`telegram_call_stop`/`telegram_call_status` → `TelegramController.call_start/stop/status`
-      - [x] Events: `telegram_call_state` (ringing/connecting/connected/ended/error), `telegram_call_result`
-      - [x] C# events: `TelegramCallStateChanged(state, message)`, `TelegramCallResult(ok, message)`
-      - [x] C# send: `SendTelegramCallStartAsync/StopAsync/StatusAsync`
-      - [x] Full flow: create_p2p_call → getDhConfig → init_exchange → RequestCall (rings) → PhoneCallAccepted → exchange_keys → ConfirmCall → connect_p2p (RTC) → FILE tone out / PCM-in via on_frames → DiscardCall
-      - [x] Gate: `TelegramCallEnabled` (off by default), requires resolved target + valid session
-- [ ] **C8:** InCallAudioBridge (48k<->16k/24k resample adapters) + mic bypass + barge-in/queue
+      - [x] Backend events: `telegram_call_state` (ringing/connecting/connected/ended/error), `telegram_call_result`
+      - [x] C# events: `TelegramCallStateChanged`, `TelegramCallResult`
+      - [x] C# send methods: `SendTelegramCallStartAsync`, `SendTelegramCallStopAsync`, `SendTelegramCallStatusAsync`
+      - [x] Full call flow: create_p2p_call → getDhConfig → init_exchange → RequestCall (rings) → PhoneCallAccepted → exchange_keys → ConfirmCall → connect_p2p → FILE tone out / PCM-in via on_frames → DiscardCall
+      - [x] Gate: TelegramCallEnabled (off by default), requires resolved target + valid session
+- [x] **C8.1:** call_start with payload + fallback logic (ring→answer→discard evaluation)
+- [x] **C8.2:** C# events + send methods (TelegramCallStateChanged, TelegramCallResult, TelegramCallFallbackSent)
+- [x] **C8.3:** Guardian wired to call_start with payload (away mode + high-priority)
+- [x] **C8.4:** UI status display + fallback notification in MainWindow
+- [x] **C8.5:** Config settings (CallFallbackEnabled, CallFallbackThresholdSeconds, CallFallbackChatId) + env overrides
+- [ ] **C8.6:** InCallAudioBridge (48k<->16k/24k adapters) + mic bypass + barge-in/queue
   drain on remote speech.
 - [ ] **C9:** Ring/accept/dial UI in MainWindow (status + "Test Call" + disconnect), tools stay live
   in-call, secure auth UX, logging.

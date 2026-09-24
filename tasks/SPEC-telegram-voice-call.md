@@ -11,18 +11,22 @@ This spec does NOT apply to: Telegram Bot API messaging, voice messages, or simu
 
 ## Capability Map (Phase 0 — scope check)
 
-| Module id | Responsibility | Depends on |
-|---|---|---|
-| `tg-auth` | User-account login, encrypted session persistence (DPAPI), auto-reconnect | — |
-| `tg-target` | Resolve/call target (@user/phone → validated User), persist target | `tg-auth` |
-| `tg-voip` | Outgoing call signaling (requestCall/accept/discard), state machine, ring UI | `tg-auth`, `tg-target` |
-| `tg-audio` | Telegram WebRTC media bridge: PCM streaming, 48 k ↔ 16 k / 24 k resampling | `tg-voip` |
-| `tg-gemini` | Gemini Live ↔ Telegram audio bridge: mic bypass, streaming, barge-in | `tg-audio` + existing `gemini_backend.py` |
-| `tg-tools` | In-call tool access, conversation context, event-triggered auto-calls | `tg-gemini` + existing tool framework |
-| `tg-ui` | Settings panel, status, test-call button, configuration UX | `tg-auth`, `tg-target`, `tg-voip` |
+| Module id | Responsibility | Depends on | Status |
+|---|---|---|---|
+| `tg-auth` | User-account login, encrypted session persistence (DPAPI), auto-reconnect | — | ✅ Done |
+| `tg-target` | Resolve/call target (@user/phone → validated User), persist target | `tg-auth` | ✅ Done |
+| `tg-voip` | Outgoing call signaling (requestCall/accept/discard), state machine, ring UI | `tg-auth`, `tg-target` | ✅ Done |
+| `tg-audio` | Telegram WebRTC media bridge: PCM streaming, 48 k ↔ 16 k / 24 k resampling | `tg-voip` | 🔄 In progress (C8.6) |
+| `tg-gemini` | Gemini Live ↔ Telegram audio bridge: mic bypass, streaming, barge-in | `tg-audio` + existing `gemini_backend.py` | ⏳ Pending |
+| `tg-tools` | In-call tool access, conversation context, event-triggered auto-calls | `tg-gemini` + existing tool framework | ⏳ Pending |
+| `tg-ui` | Settings panel, status, test-call button, configuration UX | `tg-auth`, `tg-target`, `tg-voip` | ✅ Done (C8.4) |
 
 **Build order:** `tg-auth` → `tg-target` → `tg-voip` (spike/validate) → `tg-audio` →
 `tg-gemini` → `tg-tools` + `tg-ui` (parallel).
+
+Each module ships green before the next starts. Every module spec is independent and testable.
+
+**Current phase:** C8.6 (InCallAudioBridge) — resampling adapters, mic bypass, barge-in/queue drain.
 
 Each module ships green before the next starts. Every module spec is independent and testable.
 
