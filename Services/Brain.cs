@@ -62,21 +62,11 @@ public sealed class Brain : IDisposable
     }
 
     public string SendSms(string number, string message)
-    {
-        try
-        {
-            var json = new JsonObject
-            {
-                ["number"] = number,
-                ["message"] = message,
-            };
-            return PhoneTools.Execute(null, "phone_send_sms", json);
-        }
-        catch (Exception e)
-        {
-            return "SMS failed: " + e.Message;
-        }
-    }
+{
+    // SMS is handled by the C# Outreach service via ADB, not by the Python backend.
+    // This method is kept for interface compatibility but delegates to C# side.
+    return "SMS sending not available in local mode — use the C# outreach path instead.";
+}
 
     private async Task<string> ExecuteToolAsync(string toolName, JsonNode? json)
     {

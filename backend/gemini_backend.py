@@ -28,9 +28,9 @@ import time
 import traceback
 from datetime import datetime
 
-# CRITICAL: Redirect stdout to stderr IMMEDIATELY at startup.
-# This ensures stdout is used ONLY for JSON IPC messages.
-# Any print() or other output goes to stderr instead.
+# CRITICAL: Save real stdout for JSON IPC *before* redirecting stdout to stderr.
+# stdout is used ONLY for JSON IPC messages. print() and other output go to stderr.
+_ipc_stdout = sys.stdout
 sys.stdout = sys.stderr
 
 # --- google-genai imports ---
@@ -1376,13 +1376,20 @@ class GeminiSession:
                 return
             self._user_spoke = True
             mono = indata[:, 0]
-            if vad is not None:
-                vad.process_and_emit(
-                    mono.astype(np.float32),
-                    lambda b: audio_queue.put_nowait(b),
-                )
+            
+            # Check if mic bypass is active (Telegram call in progress)
+            if self._audio_bridge and self._audio_bridge._mic_bypassed:
+                # Route local mic to Telegram via audio bridge (bypass Gemini)
+                pcm_48k = (mono * 32767).astype(np.int16).tobytes()
+                self._audio_bridge.feed_local_mic(pcm_48k)
             else:
-                audio_queue.put_nowait((mono * 32767).astype(np.int16).tobytes())
+                if vad is not None:
+                    vad.process_and_emit(
+                        mono.astype(np.float32),
+                        lambda b: audio_queue.put_nowait(b),
+                    )
+                else:
+                    audio_queue.put_nowait((mono * 32767).astype(np.int16).tobytes())
 
         # Mic device switching: the stream is (re)opened whenever the device
         # index or the reopen flag changes. Open failures are non-fatal: we
@@ -1923,8 +1930,8 @@ class GeminiSession:
 def _send_event(event: dict):
     try:
         line = json.dumps(event, ensure_ascii=False)
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        _ipc_stdout.write(line + "\n")
+        _ipc_stdout.flush()
     except Exception:
         pass
 

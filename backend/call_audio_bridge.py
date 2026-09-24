@@ -266,6 +266,18 @@ class InCallAudioBridge:
         """Enable/disable mic bypass (route system mic to Telegram instead of Gemini)."""
         self._mic_bypassed = enabled
     
+    def feed_local_mic(self, pcm_48k: bytes) -> None:
+        """Feed local microphone audio directly to Telegram via named pipe (mic bypass)."""
+        if not self._call_active or not self._mic_bypassed:
+            return
+        # Resample 48k -> 48k (no resampling needed, just write to pipe)
+        # The pipe expects 48kHz mono int16 PCM
+        if self._pipe_writer and self._pipe_writer.write(pcm_48k):
+            self._stats["tx_frames"] += 1
+            self._stats["bytes_tx"] += len(pcm_48k)
+        else:
+            print("[AudioBridge] Local mic pipe write failed (not connected?)")
+    
     def get_stats(self) -> dict:
         return dict(self._stats)
     
