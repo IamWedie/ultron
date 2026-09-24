@@ -85,7 +85,7 @@ public sealed class DashboardServer : IDisposable
     {
         try
         {
-            var listener = new TcpListener(IPAddress.Any, _port);
+            var listener = new TcpListener(IPAddress.Loopback, _port);
             listener.Start(512);
             ActualPort = ((IPEndPoint)listener.LocalEndpoint).Port;
             Running = true;
