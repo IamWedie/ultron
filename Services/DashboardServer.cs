@@ -63,7 +63,7 @@ public sealed class DashboardServer : IDisposable
         return $"http://{LanIp()}:{port}/";
     }
 
-    private static string LanIp()
+    public static string LanIp()
     {
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {

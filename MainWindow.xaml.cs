@@ -24,20 +24,20 @@ namespace Ultron;
     Justification = "MainWindow is the composition root; it disposes owned services once in its Closed handler.")]
 public sealed partial class MainWindow : Window
 {
-    private static void Dbg(string msg)
+    internal static void Dbg(string msg)
     {
         AppLog.Write("Main", $"[{Environment.CurrentManagedThreadId}] {msg}");
     }
     private readonly AppWindow _appWindow;
     private DateTime _lastInteraction = DateTime.UtcNow;
     private readonly AppSettings _settings;
-    private readonly MemoryStore _memory;
-    private readonly Brain _brain;
-    private readonly Outreach _outreach;
-    private readonly AssistantStateMachine _sm;
-    private readonly SystemTelemetry _telemetry = new();
-    private readonly AudioCapture? _audio;
-    private readonly VoiceId _voiceId = new();
+    internal readonly MemoryStore _memory;
+    internal readonly Brain _brain;
+    internal readonly Outreach _outreach;
+    internal readonly AssistantStateMachine _sm;
+    internal readonly SystemTelemetry _telemetry = new();
+    internal AudioCapture? _audio;
+    internal readonly VoiceId _voiceId = new();
     private readonly object _verifyLock = new();
     private readonly DispatcherTimer _verifyWatch = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly System.Collections.Generic.Queue<double> _spark = new();
@@ -46,36 +46,36 @@ public sealed partial class MainWindow : Window
     private DateTime _verifyStart;
     private int _silentTicks;
 
-    private readonly ModelRepo _repo;
-    private readonly GeminiBackend _gemini;
-    private TextBlock? _tgStatusText;
-    private StackPanel? _tgCodePanel;
-    private TextBox? _tgCodeBox;
-    private volatile bool _geminiMode;
-    private bool _awakeInGemini = true;
-    private bool _wakeGateOn;
+    internal readonly ModelRepo _repo;
+    internal readonly GeminiBackend _gemini;
+    internal TextBlock? _tgStatusText;
+    internal StackPanel? _tgCodePanel;
+    internal TextBox? _tgCodeBox;
+    internal volatile bool _geminiMode;
+    internal bool _awakeInGemini = true;
+    internal bool _wakeGateOn;
     private IntPtr _selfHwnd;
-    private IntPtr _lastTargetWindow = IntPtr.Zero;
+    internal IntPtr _lastTargetWindow = IntPtr.Zero;
     private WhisperStt? _whisper;
-    private SileroVad? _vad;
-    private readonly List<float> _vadBuf = new();
-    private readonly List<float> _speechSeg = new();
-    private bool _vadSpeaking;
-    private int _vadSilenceCount;
-    private const int VadSilenceFrames = 22;
-    private bool _modelsLoaded;
-    private readonly ConcurrentQueue<float[]> _sttQueue = new();
-    private bool _sttPumping;
+    internal SileroVad? _vad;
+    internal readonly List<float> _vadBuf = new();
+    internal readonly List<float> _speechSeg = new();
+    internal bool _vadSpeaking;
+    internal int _vadSilenceCount;
+    internal const int VadSilenceFrames = 22;
+    internal bool _modelsLoaded;
+    internal readonly ConcurrentQueue<float[]> _sttQueue = new();
+    internal bool _sttPumping;
 
     private TrayIcon? _tray;
-    private HotkeyService? _hotkeys;
-    private NotificationService? _notify;
-    private DashboardServer? _dashboard;
-    private string? _dashboardUrl;
+    internal HotkeyService? _hotkeys;
+    internal NotificationService? _notify;
+    internal DashboardServer? _dashboard;
+    internal string? _dashboardUrl;
     private volatile bool _micMuted;
-    private DispatcherTimer? _heartbeatTimer;
-    private DispatcherTimer? _callTimer;
-    private TimeSpan _callDuration;
+    internal DispatcherTimer? _heartbeatTimer;
+    internal DispatcherTimer? _callTimer;
+    internal TimeSpan _callDuration;
     private const int HotkeyPtt = 1, HotkeyMute = 2, HotkeyWake = 3;
 
     public MainWindow()
@@ -1282,7 +1282,7 @@ public sealed partial class MainWindow : Window
 
     /* ===================== COMMAND BAR ===================== */
 
-    private StackPanel AddMessage(string who, string text)
+    internal StackPanel AddMessage(string who, string text)
     {
         var item = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, 8) };
         item.Children.Add(new TextBlock
@@ -1434,7 +1434,7 @@ public sealed partial class MainWindow : Window
 
     /* ===================== LAN WEB DECK ===================== */
 
-    private void EnsureDashboard(int port)
+    internal void EnsureDashboard(int port)
     {
         _dashboard?.Dispose();
         _dashboard = new DashboardServer(port);
@@ -1513,7 +1513,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>(Re)apply the configured global hotkeys. Reports invalid specs and
     /// combos that are already held by another app, keeping prior bindings intact.</summary>
-    private void ApplyHotkeyBindings()
+    internal void ApplyHotkeyBindings()
     {
         if (_hotkeys is null) return;
         foreach (var (id, spec) in new[]
@@ -2782,7 +2782,7 @@ case "undo":
         catch { }
     }
 
-    private IntPtr ResolveTypeTarget()
+    internal IntPtr ResolveTypeTarget()
     {
         try
         {
@@ -2803,7 +2803,7 @@ case "undo":
         return IntPtr.Zero;
     }
 
-    private static void SendTypedText(string text)
+    internal static void SendTypedText(string text)
     {
         var inputs = new List<NativeInput>();
         foreach (char c in text)
@@ -2827,7 +2827,7 @@ case "undo":
         SendInputBatch(inputs);
     }
 
-    private static void SendInputBatch(List<NativeInput> inputs)
+    internal static void SendInputBatch(List<NativeInput> inputs)
     {
         if (inputs.Count == 0) return;
         var arr = inputs.ToArray();
@@ -2848,7 +2848,7 @@ case "undo":
         Dbg($"SendInput: {sent}/{inputs.Count} events injected.");
     }
 
-    private static NativeInput KeyCodeInput(ushort code, bool keyUp, bool unicode)
+    internal static NativeInput KeyCodeInput(ushort code, bool keyUp, bool unicode)
     {
         return new NativeInput
         {
@@ -3752,7 +3752,7 @@ var (v, m) = before;
     /* ===================== SENDINPUT NATIVE HELPERS ===================== */
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct NativeKeyboardInput
+    internal struct NativeKeyboardInput
     {
         public ushort wVk;
         public ushort wScan;
@@ -3762,7 +3762,7 @@ var (v, m) = before;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct NativeMouseInput
+    internal struct NativeMouseInput
     {
         public int dx;
         public int dy;
@@ -3777,7 +3777,7 @@ var (v, m) = before;
     // on x64, so Marshal.SizeOf == 40 (the real size Windows expects). Passing a
     // wrong cbSize makes SendInput reject the batch AND read past the buffer.
     [StructLayout(LayoutKind.Explicit)]
-    private struct NativeInput
+    internal struct NativeInput
     {
         [FieldOffset(0)] public uint Type;
         [FieldOffset(8)] public NativeKeyboardInput kb;
@@ -3785,7 +3785,7 @@ var (v, m) = before;
         public static int Size => Marshal.SizeOf(typeof(NativeInput));
     }
 
-    private static class Native
+    internal static class Native
     {
         public const uint KEYEVENTF_KEYUP = 0x0002;
         public const uint KEYEVENTF_UNICODE = 0x0004;
@@ -3833,7 +3833,7 @@ var (v, m) = before;
         }
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-        public struct NativePoint { public int X; public int Y; }
+        internal struct NativePoint { public int X; public int Y; }
 
         public const int SW_RESTORE = 9;
         public const int SW_MINIMIZE = 6;
@@ -3848,7 +3848,7 @@ var (v, m) = before;
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-        public struct NativeRect { public int Left, Top, Right, Bottom; }
+        internal struct NativeRect { public int Left, Top, Right, Bottom; }
 
         public static NativeRect GetWindowRectR(IntPtr hWnd)
         {
