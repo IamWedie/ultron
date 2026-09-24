@@ -1574,49 +1574,53 @@ class GeminiSession:
                             # Vision tools are pure-Python backend work (capture +
                             # injection). Handle them here instead of round-tripping
                             # through the C# frontend.
-                            if fc.name == "screen_process":
-                                result = await self._handle_screen_process(args)
-                            elif fc.name == "close_camera":
-                                self._pending_vision = None
-                                result = "Camera closed."
-                            elif fc.name == "set_voice":
-                                result = self._handle_set_voice(args)
-                            elif fc.name == "set_live_vision":
-                                result = self._handle_set_live_vision(args)
-                            elif fc.name == "manage_monitor":
-                                result = self._handle_manage_monitor(args)
-                            elif fc.name == "background_monitor":
-                                result = await self._handle_background_monitor(args)
-                            elif fc.name == "flight_finder":
-                                result = self._handle_flight_finder(args)
-                            elif fc.name == "audio_devices_list":
-                                result = await asyncio.to_thread(tools_extra.list_input_devices)
-                            elif fc.name == "computer_use":
-                                result = await self._handle_computer_use(args)
-                            elif fc.name == "create_document":
-                                result = await self._handle_create_document(args)
-                            elif fc.name == "task_inbox":
-                                result = self._handle_task_inbox(args)
-                            elif fc.name == "guardian":
-                                result = await self._handle_guardian(args)
-                            elif fc.name == "set_mic_device":
-                                try:
-                                    idx = int(args.get("index"))
-                                except (TypeError, ValueError):
-                                    result = "Provide a valid device index (run audio_devices_list first)."
+                            try:
+                                if fc.name == "screen_process":
+                                    result = await self._handle_screen_process(args)
+                                elif fc.name == "close_camera":
+                                    self._pending_vision = None
+                                    result = "Camera closed."
+                                elif fc.name == "set_voice":
+                                    result = self._handle_set_voice(args)
+                                elif fc.name == "set_live_vision":
+                                    result = self._handle_set_live_vision(args)
+                                elif fc.name == "manage_monitor":
+                                    result = self._handle_manage_monitor(args)
+                                elif fc.name == "background_monitor":
+                                    result = await self._handle_background_monitor(args)
+                                elif fc.name == "flight_finder":
+                                    result = self._handle_flight_finder(args)
+                                elif fc.name == "audio_devices_list":
+                                    result = await asyncio.to_thread(tools_extra.list_input_devices)
+                                elif fc.name == "computer_use":
+                                    result = await self._handle_computer_use(args)
+                                elif fc.name == "create_document":
+                                    result = await self._handle_create_document(args)
+                                elif fc.name == "task_inbox":
+                                    result = self._handle_task_inbox(args)
+                                elif fc.name == "guardian":
+                                    result = await self._handle_guardian(args)
+                                elif fc.name == "set_mic_device":
+                                    try:
+                                        idx = int(args.get("index"))
+                                    except (TypeError, ValueError):
+                                        result = "Provide a valid device index (run audio_devices_list first)."
+                                    else:
+                                        self._mic_device = idx
+                                        result = f"Switched input device to index {idx}."
+                                elif fc.name == "flight_finder":
+                                    result = self._handle_flight_finder(args)
                                 else:
-                                    self._mic_device = idx
-                                    result = f"Switched input device to index {idx}."
-                            elif fc.name == "flight_finder":
-                                result = self._handle_flight_finder(args)
-                            else:
-                                _send_event({
-                                    "type": "tool_call",
-                                    "id": call_id,
-                                    "name": fc.name,
-                                    "args": args,
-                                })
-                                continue
+                                    _send_event({
+                                        "type": "tool_call",
+                                        "id": call_id,
+                                        "name": fc.name,
+                                        "args": args,
+                                    })
+                                    continue
+                            except Exception as e:
+                                result = f"Tool {fc.name} failed: {e}"
+                                print(f"[Tool error] {fc.name}: {e}", file=sys.stderr)
                             try:
                                 await self.session.send_tool_response(
                                     function_responses=[{
