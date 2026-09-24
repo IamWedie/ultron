@@ -78,7 +78,7 @@
             </Grid.ColumnDefinitions>
 
             <!-- Call status overlay (spans all columns) -->
-            <Border x:Name="CallStatusOverlay" Grid.ColumnSpan="3"
+            <Border x:Name="CallStatusOverlay" x:FieldModifier="internal" Grid.ColumnSpan="3"
                     Background="#E61E1F24" Visibility="Collapsed"
                     BorderBrush="{StaticResource UltronCrimsonBrush}" BorderThickness="0,0,0,2">
                 <Grid Padding="20,12" ColumnSpacing="16">
@@ -90,35 +90,35 @@
                     
                     <!-- Call status indicator -->
                     <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                        <Ellipse x:Name="CallStatusDot" Width="14" Height="14" Fill="{StaticResource UltronCrimsonBrush}" />
+                        <Ellipse x:Name="CallStatusDot" x:FieldModifier="internal" Width="14" Height="14" Fill="{StaticResource UltronCrimsonBrush}" />
                         <StackPanel Orientation="Vertical" Spacing="2">
-                            <TextBlock x:Name="CallStatusText" Text="CALLING..."
+                            <TextBlock x:Name="CallStatusText" x:FieldModifier="internal" Text="CALLING..."
                                        FontFamily="Consolas" FontSize="13" Foreground="White" FontWeight="SemiBold" />
-                            <TextBlock x:Name="CallTargetText" Text=""
+                            <TextBlock x:Name="CallTargetText" x:FieldModifier="internal" Text=""
                                        FontFamily="Consolas" FontSize="11" Foreground="#FF9BA1AB" />
                         </StackPanel>
                     </StackPanel>
                     
                     <!-- Call duration timer -->
-                    <TextBlock x:Name="CallDurationText" Grid.Column="1" Text="00:00"
+                    <TextBlock x:Name="CallDurationText" x:FieldModifier="internal" Grid.Column="1" Text="00:00"
                                FontFamily="Consolas" FontSize="22" Foreground="White"
                                HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold" />
                     
                     <!-- Call controls -->
                     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <Button x:Name="CallHangupButton" Content="&#xE77D;" 
+                        <Button x:Name="CallHangupButton" x:FieldModifier="internal" Content="&#xE77D;" 
                                 Width="48" Height="48" CornerRadius="24" Click="CallHangupButton_Click"
                                 Background="{StaticResource UltronCrimsonBrush}" BorderThickness="0"
                                 FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="White"
                                 ToolTipService.ToolTip="Hang Up" />
                         
-                        <Button x:Name="CallAcceptButton" Content="&#xE898;"
+                        <Button x:Name="CallAcceptButton" x:FieldModifier="internal" Content="&#xE898;"
                                 Width="48" Height="48" CornerRadius="24" Click="CallAcceptButton_Click"
                                 Background="{StaticResource UltronGoldBrush}" BorderThickness="0"
                                 FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#FF1E1F24"
                                 ToolTipService.ToolTip="Accept Call" Visibility="Collapsed" />
                         
-                        <Button x:Name="CallDeclineButton" Content="&#xE77D;"
+                        <Button x:Name="CallDeclineButton" x:FieldModifier="internal" Content="&#xE77D;"
                                 Width="48" Height="48" CornerRadius="24" Click="CallDeclineButton_Click"
                                 Background="#33FF2E2E" BorderThickness="0"
                                 FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#FF2E2E"
