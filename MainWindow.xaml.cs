@@ -2466,6 +2466,23 @@ public sealed partial class MainWindow : Window
 
     private async Task<string> ExecuteGeminiToolAsync(GeminiToolCall call)
     {
+        // Tools that require user approval before execution
+        var approvalRequiredTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "type_text", "press_key", "computer_use", "file_processor",
+            "shutdown_jarvis", "desktop_control", "window_manage",
+            "computer_settings", "send_message"
+        };
+
+        if (approvalRequiredTools.Contains(call.Name))
+        {
+            var approved = await RequestToolApproval(call);
+            if (!approved)
+            {
+                return $"User denied approval for {call.Name}.";
+            }
+        }
+
         switch (call.Name)
         {
             case "save_memory": return HandleSaveMemory(call.Args);
@@ -2496,6 +2513,47 @@ case "undo":
                 return HandleUndo();
             default: return $"Tool '{call.Name}' is not available yet.";
         }
+    }
+
+    private async Task<bool> RequestToolApproval(GeminiToolCall call)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var description = call.Name switch
+        {
+            "type_text" => $"Type text into focused window: \"{call.Args?.GetValueOrDefault("text")}\"",
+            "press_key" => $"Press key/shortcut: \"{call.Args?.GetValueOrDefault("keys")}\"",
+            "computer_use" => $"Run autonomous desktop task: \"{call.Args?.GetValueOrDefault("task")}\"",
+            "file_processor" => $"File operation: {call.Args?.GetValueOrDefault("action")} on {call.Args?.GetValueOrDefault("file_path")}",
+            "shutdown_jarvis" => "Shut down ULTRON completely.",
+            "desktop_control" => $"Mouse/keyboard action: {call.Args?.GetValueOrDefault("action")}",
+            "window_manage" => $"Window action: {call.Args?.GetValueOrDefault("action")}",
+            "computer_settings" => $"System setting change: {call.Args?.GetValueOrDefault("action")}",
+            "send_message" => $"Send message to {call.Args?.GetValueOrDefault("receiver")} via {call.Args?.GetValueOrDefault("platform")}",
+            _ => $"Execute {call.Name}?"
+        };
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content?.XamlRoot,
+            Title = "TOOL APPROVAL REQUIRED",
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = $"ULTRON wants to execute: {call.Name}", TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
+                    new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
+                }
+            },
+            PrimaryButtonText = "Approve",
+            CloseButtonText = "Deny",
+        };
+
+        if (dialog.XamlRoot == null) return false;
+        var result = await dialog.ShowAsync();
+        tcs.TrySetResult(result == ContentDialogResult.Primary);
+        return await tcs.Task;
     }
 
     /* ===================== UNDO LEDGER ===================== */
