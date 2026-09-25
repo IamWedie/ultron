@@ -61,6 +61,7 @@ public sealed class GeminiBackend : IDisposable
     private CancellationTokenSource? _runCts;
     private bool _disposed;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTools = new();
 
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(20);
@@ -92,26 +93,44 @@ public sealed class GeminiBackend : IDisposable
 
     public async Task StartAsync(string apiKey, string voice = "Charon")
     {
+        Process? process;
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            process = await StartProcessCoreAsync(apiKey, voice);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+        if (process is not null && !string.IsNullOrWhiteSpace(apiKey))
+            await WaitForHandshakeAsync(process);
+    }
+
+    private async Task<Process?> StartProcessCoreAsync(string apiKey, string voice = "Charon")
+    {
         if (_proc is { HasExited: false })
         {
             Dbg("StartAsync: already running, stopping first");
-            Stop();
+            await StopCoreAsync();
         }
 
         var pythonExe = FindPython();
         if (string.IsNullOrEmpty(pythonExe))
         {
             ErrorOccurred?.Invoke("Python not found. Install Python 3.11+ and add to PATH.");
-            return;
+            return null;
         }
 
         if (!File.Exists(BackendScript))
         {
             ErrorOccurred?.Invoke($"Backend script not found: {BackendScript}");
-            return;
+            return null;
         }
 
         Dbg($"StartAsync: python={pythonExe}, voice={voice}");
+        BackendVersion = "";
+        BackendCapabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var psi = new ProcessStartInfo
         {
@@ -133,15 +152,16 @@ public sealed class GeminiBackend : IDisposable
         psi.Environment["ULTRON_TELEGRAM_PHONE"] = TelegramOptions?.Phone ?? "";
         psi.Environment["ULTRON_TELEGRAM_ENABLED"] = TelegramOptions is { Enabled: true } ? "1" : "0";
 
-        _proc = Process.Start(psi);
-        if (_proc is null)
+        var proc = Process.Start(psi);
+        if (proc is null)
         {
             ErrorOccurred?.Invoke("Failed to start Python backend process.");
-            return;
+            return null;
         }
+        _proc = proc;
 
-        _proc.EnableRaisingEvents = true;
-        _proc.Exited += OnProcessExited;
+        proc.EnableRaisingEvents = true;
+        proc.Exited += OnProcessExited;
 
         // Cancellation token scoped to this backend run so loops exit on stop/restart.
         _runCts?.Cancel();
@@ -149,21 +169,31 @@ public sealed class GeminiBackend : IDisposable
         _runCts = new CancellationTokenSource();
         var token = _runCts.Token;
 
-        _ = Task.Run(() => ReadOutputLoop(_proc.StandardOutput, token), token);
-        _ = Task.Run(() => ReadErrorLoop(_proc.StandardError, token), token);
+        _ = Task.Run(() => ReadOutputLoop(proc.StandardOutput, proc, token), token);
+        _ = Task.Run(() => ReadErrorLoop(proc.StandardError, proc, token), token);
 
-        // Send start command
         await SendAsync(new { type = "start", api_key = apiKey, voice, personality = Persona.ToPayload() });
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            State = "waiting";
+            StatusChanged?.Invoke("waiting");
+            return proc;
+        }
 
         State = "connecting";
         StatusChanged?.Invoke("connecting");
+        return proc;
+    }
 
-        // Fail fast if the backend never completes its handshake: a stuck
-        // python process should not leave the UI in "connecting" forever.
+    private async Task WaitForHandshakeAsync(Process process)
+    {
+        var token = _runCts?.Token ?? CancellationToken.None;
         var deadline = DateTime.UtcNow + HandshakeTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            if (_proc.HasExited)
+            if (!ReferenceEquals(_proc, process)) return;
+            if (process.HasExited)
             {
                 ErrorOccurred?.Invoke("Backend process exited before the handshake completed.");
                 return;
@@ -173,10 +203,23 @@ public sealed class GeminiBackend : IDisposable
         }
         Dbg("Handshake timeout: backend did not report version within 20s");
         ErrorOccurred?.Invoke("Backend handshake timed out.");
-        await StopAsync();
+        await StopCoreAsync();
     }
 
     public async Task StopAsync()
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            await StopCoreAsync();
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task StopCoreAsync()
     {
         if (_disposed) { StopCleanup(); return; }
         _runCts?.Cancel();
@@ -215,6 +258,8 @@ public sealed class GeminiBackend : IDisposable
         _runCts?.Cancel();
         _runCts?.Dispose();
         _runCts = null;
+        BackendVersion = "";
+        BackendCapabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in _pendingTools)
             kv.Value.TrySetResult("Backend stopped while the tool was running.");
         _pendingTools.Clear();
@@ -236,6 +281,11 @@ public sealed class GeminiBackend : IDisposable
     public async Task SetAwakeAsync(bool on)
     {
         await SendAsync(new { type = "set_awake", on });
+    }
+
+    public async Task SetMicMutedAsync(bool muted)
+    {
+        await SendAsync(new { type = "set_mic_muted", muted });
     }
 
     public async Task SetWakeEnabledAsync(bool enabled)
@@ -371,11 +421,11 @@ public sealed class GeminiBackend : IDisposable
         }
     }
 
-    private async Task ReadOutputLoop(StreamReader reader, CancellationToken token)
+    private async Task ReadOutputLoop(StreamReader reader, Process process, CancellationToken token)
     {
         try
         {
-            while (!token.IsCancellationRequested)
+            while (!token.IsCancellationRequested && ReferenceEquals(_proc, process))
             {
                 var line = await reader.ReadLineAsync(token);
                 if (line is null) break;
@@ -531,11 +581,11 @@ public sealed class GeminiBackend : IDisposable
         }
     }
 
-    private async Task ReadErrorLoop(StreamReader reader, CancellationToken token)
+    private async Task ReadErrorLoop(StreamReader reader, Process process, CancellationToken token)
     {
         try
         {
-            while (!token.IsCancellationRequested)
+            while (!token.IsCancellationRequested && ReferenceEquals(_proc, process))
             {
                 var line = await reader.ReadLineAsync(token);
                 if (line is null) break;
@@ -551,6 +601,8 @@ public sealed class GeminiBackend : IDisposable
     /// leave the C# side awaiting a result that will never arrive.</summary>
     private void OnProcessExited(object? sender, EventArgs e)
     {
+        if (sender is Process process && !ReferenceEquals(_proc, process))
+            return;
         Dbg("Process exited");
         foreach (var kv in _pendingTools)
             kv.Value.TrySetResult("Backend process exited while the tool was running.");

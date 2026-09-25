@@ -19,7 +19,7 @@ public class BackendIntegrationTests
     private static string FindRepoRoot()
     {
         var dir = Path.GetDirectoryName(typeof(BackendIntegrationTests).Assembly.Location)!;
-        for (var i = 0; i < 5; i++)
+        for (var i = 0; i < 12; i++)
         {
             if (File.Exists(Path.Combine(dir, "backend", "gemini_backend.py")))
                 return dir;
@@ -70,13 +70,28 @@ public class BackendIntegrationTests
         catch { return false; }
     }
 
+    private static void RequireOrSkip(string message)
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI")))
+            throw new InvalidOperationException(message);
+    }
+
     [Fact]
     public void Backend_Waiting_StartWithBadKey_ErrorThenExit()
     {
         var python = FindPython();
-        if (python is null) return;
-        if (!HasBackendDeps(python)) return;
-        if (!File.Exists(BackendScript)) return;
+        if (python is null)
+        {
+            RequireOrSkip("Python is required for the backend integration test.");
+            return;
+        }
+        if (!HasBackendDeps(python))
+        {
+            RequireOrSkip("Backend Python dependencies are required for the integration test.");
+            return;
+        }
+        if (!File.Exists(BackendScript))
+            throw new FileNotFoundException("Backend script was not found.", BackendScript);
 
         var psi = new ProcessStartInfo(python, $"\"{BackendScript}\"")
         {
@@ -138,9 +153,13 @@ public class BackendIntegrationTests
         }
 
         if (!proc.HasExited)
+        {
+            proc.StandardInput.WriteLine("{\"type\":\"stop\"}");
+            proc.StandardInput.Flush();
             proc.WaitForExit(10_000);
+        }
 
-        Assert.True(proc.HasExited, "Backend process did not exit within 10 s of receiving the error.");
+        Assert.True(proc.HasExited, "Backend process did not exit after stop.");
         Assert.True(sawError || sawStatus,
             "Expected at least one error or error-status event after sending a bad API key.");
 

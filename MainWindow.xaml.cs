@@ -82,6 +82,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         _settings = AppSettings.Load();
+        _micMuted = _settings.MicMuted;
         UltronOptions.Set(_settings);
         AppLog.SetVerbosity(_settings.LogLevel);
         _memory = new MemoryStore();
@@ -351,15 +352,12 @@ public sealed partial class MainWindow : Window
                 _ = EnsureVadAsync();
             }
 
-            // Start Gemini backend
-            if (!string.IsNullOrEmpty(_settings.GeminiApiKey))
+            Dbg("LoadModels: starting Gemini backend");
+            _ = Task.Run(async () =>
             {
-                Dbg("LoadModels: starting Gemini backend");
-                _ = Task.Run(async () =>
-                {
-                    await _gemini.StartAsync(_settings.GeminiApiKey, _settings.GeminiVoice);
-                });
-            }
+                await _gemini.StartAsync(_settings.GeminiApiKey ?? "", _settings.GeminiVoice);
+                if (_micMuted) await _gemini.SetMicMutedAsync(true);
+            });
 
             // First-run friendliness: verify the runtime prerequisites that aren't
             // covered by the normal load path (python, backend payload, models, adb).
@@ -773,6 +771,8 @@ public sealed partial class MainWindow : Window
         dialog.PrimaryButtonClick += (_, _) =>
         {
             var key = keyBox.Text.Trim();
+            var previousKey = _settings.GeminiApiKey;
+            var previousVoice = _settings.GeminiVoice;
             lock (_settings)
             {
                 _settings.MemoryLogging = memoryToggle.IsOn;
@@ -832,7 +832,12 @@ public sealed partial class MainWindow : Window
                 foreach (var n in notifications) AddMessage("system", n);
             }
             if (!string.IsNullOrEmpty(key))
+            {
+                var restartBackend = previousKey != _settings.GeminiApiKey || previousVoice != _settings.GeminiVoice;
+                if (restartBackend)
+                    _ = Task.Run(async () => await _gemini.StartAsync(_settings.GeminiApiKey, _settings.GeminiVoice));
                 AddMessage("system", $"CORE ONLINE — Gemini brain configured (voice: {voiceOptions.SelectedItem?.ToString() ?? "Charon"})");
+            }
             else
                 AddMessage("system", "Settings saved.");
         };
@@ -994,6 +999,8 @@ public sealed partial class MainWindow : Window
     private static string MemoryFilePath =>
         Path.Combine(AppSettings.DataDir(), "long_term.json");
 
+    private static bool _memoryJsonCorrupt;
+
     private Dictionary<string, Dictionary<string, object?>> LoadMemoryJson()
     {
         try
@@ -1001,10 +1008,17 @@ public sealed partial class MainWindow : Window
             if (File.Exists(MemoryFilePath))
             {
                 var root = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(File.ReadAllText(MemoryFilePath));
-                if (root is not null) return root;
+                if (root is not null)
+                {
+                    _memoryJsonCorrupt = false;
+                    return root;
+                }
             }
         }
-        catch { }
+        catch
+        {
+            _memoryJsonCorrupt = true;
+        }
         return new();
     }
 
@@ -1016,12 +1030,12 @@ public sealed partial class MainWindow : Window
 
     private void SaveMemoryJson(Dictionary<string, Dictionary<string, object?>> root)
     {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(MemoryFilePath)!);
-            File.WriteAllText(MemoryFilePath, JsonSerializer.Serialize(root, MemoryJsonOpts));
-        }
-        catch { }
+        if (_memoryJsonCorrupt)
+            throw new InvalidOperationException("Memory store is corrupt and was not overwritten.");
+        Directory.CreateDirectory(Path.GetDirectoryName(MemoryFilePath)!);
+        var temporary = MemoryFilePath + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(root, MemoryJsonOpts));
+        File.Move(temporary, MemoryFilePath, true);
     }
 
     private string RecallFromMemoryJson(string query)
@@ -1406,6 +1420,9 @@ public sealed partial class MainWindow : Window
     private void ToggleMicMute()
     {
         _micMuted = !_micMuted;
+        _settings.MicMuted = _micMuted;
+        try { _settings.Save(); } catch { }
+        _ = _gemini.SetMicMutedAsync(_micMuted);
         _dashboard?.PushMute(_micMuted);
         DispatcherQueue.TryEnqueue(() =>
         {
@@ -2278,31 +2295,66 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private async void OnGeminiToolCall(GeminiToolCall call)
+    private void OnGeminiToolCall(GeminiToolCall call)
     {
-        Dbg($"Gemini tool call: {call.Name}({string.Join(", ", call.Args.Select(kv => $"{kv.Key}={kv.Value}"))})");
-        try
+        DispatcherQueue.TryEnqueue(async () =>
         {
-            var result = await ExecuteGeminiToolAsync(call);
-            await _gemini.SendToolResultAsync(call.Id, call.Name, result);
-        }
-        catch (Exception ex)
-        {
-            Dbg($"Gemini tool error: {ex.Message}");
-            await _gemini.SendToolResultAsync(call.Id, call.Name, $"Tool failed: {ex.Message}");
-        }
+            Dbg($"Gemini tool call: {call.Name}");
+            try
+            {
+                var result = await ExecuteGeminiToolAsync(call);
+                await _gemini.SendToolResultAsync(call.Id, call.Name, result);
+            }
+            catch (Exception ex)
+            {
+                Dbg($"Gemini tool error: {ex.Message}");
+                await _gemini.SendToolResultAsync(call.Id, call.Name, $"Tool failed: {ex.Message}");
+            }
+        });
     }
 
-    private async void OnComputerActRequested(string id, JsonElement action)
+    private void OnComputerActRequested(string id, JsonElement action)
     {
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            try
+            {
+                if (!await RequestComputerActionApproval(action))
+                {
+                    await _gemini.SendComputerActResultAsync(id, "User denied the desktop action.");
+                    return;
+                }
+                var result = ExecuteComputerAct(action);
+                await _gemini.SendComputerActResultAsync(id, result);
+            }
+            catch (Exception ex)
+            {
+                await _gemini.SendComputerActResultAsync(id, $"Action failed: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task<bool> RequestComputerActionApproval(JsonElement action)
+    {
+        await _approvalGate.WaitAsync();
         try
         {
-            var result = ExecuteComputerAct(action);
-            await _gemini.SendComputerActResultAsync(id, result);
+            var description = action.GetRawText();
+            if (description.Length > 600) description = description[..600] + "…";
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content?.XamlRoot,
+                Title = "DESKTOP ACTION APPROVAL REQUIRED",
+                Content = new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap },
+                PrimaryButtonText = "Approve",
+                CloseButtonText = "Deny",
+            };
+            if (dialog.XamlRoot == null) return false;
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
-        catch (Exception ex)
+        finally
         {
-            await _gemini.SendComputerActResultAsync(id, $"Action failed: {ex.Message}");
+            _approvalGate.Release();
         }
     }
 
@@ -2312,6 +2364,10 @@ public sealed partial class MainWindow : Window
         var x = action.TryGetProperty("x", out var xe) && xe.ValueKind == JsonValueKind.Number ? (int?)xe.GetInt32() : null;
         var y = action.TryGetProperty("y", out var ye) && ye.ValueKind == JsonValueKind.Number ? (int?)ye.GetInt32() : null;
         var amount = action.TryGetProperty("amount", out var ae) && ae.ValueKind == JsonValueKind.Number ? ae.GetInt32() : 1;
+        if ((x < 0 || y < 0 || x > 10000 || y > 10000) && type is "click" or "double_click" or "right_click" or "move")
+            return "Desktop coordinates are outside the allowed range.";
+        if (type == "scroll" && Math.Abs(amount) > 100)
+            return "Scroll amount is outside the allowed range.";
 
         switch (type)
         {
@@ -2368,7 +2424,10 @@ public sealed partial class MainWindow : Window
             {
                 await Task.Delay(5000);
                 if (!string.IsNullOrEmpty(_settings.GeminiApiKey))
+                {
                     await _gemini.StartAsync(_settings.GeminiApiKey, _settings.GeminiVoice);
+                    if (_micMuted) await _gemini.SetMicMutedAsync(true);
+                }
             });
         });
     }
@@ -2471,7 +2530,8 @@ public sealed partial class MainWindow : Window
         {
             "type_text", "press_key", "computer_use", "file_processor",
             "shutdown_jarvis", "desktop_control", "window_manage",
-            "computer_settings", "send_message"
+            "computer_settings", "send_message", "open_app",
+            "browser_control", "undo"
         };
 
         if (approvalRequiredTools.Contains(call.Name))
@@ -2517,44 +2577,53 @@ case "undo":
 
     private async Task<bool> RequestToolApproval(GeminiToolCall call)
     {
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        var description = call.Name switch
+        await _approvalGate.WaitAsync();
+        try
         {
-            "type_text" => $"Type text into focused window: \"{call.Args?.GetValueOrDefault("text")}\"",
-            "press_key" => $"Press key/shortcut: \"{call.Args?.GetValueOrDefault("keys")}\"",
-            "computer_use" => $"Run autonomous desktop task: \"{call.Args?.GetValueOrDefault("task")}\"",
-            "file_processor" => $"File operation: {call.Args?.GetValueOrDefault("action")} on {call.Args?.GetValueOrDefault("file_path")}",
-            "shutdown_jarvis" => "Shut down ULTRON completely.",
-            "desktop_control" => $"Mouse/keyboard action: {call.Args?.GetValueOrDefault("action")}",
-            "window_manage" => $"Window action: {call.Args?.GetValueOrDefault("action")}",
-            "computer_settings" => $"System setting change: {call.Args?.GetValueOrDefault("action")}",
-            "send_message" => $"Send message to {call.Args?.GetValueOrDefault("receiver")} via {call.Args?.GetValueOrDefault("platform")}",
-            _ => $"Execute {call.Name}?"
-        };
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = Content?.XamlRoot,
-            Title = "TOOL APPROVAL REQUIRED",
-            Content = new StackPanel
+            var description = call.Name switch
             {
-                Spacing = 8,
-                Children =
-                {
-                    new TextBlock { Text = $"ULTRON wants to execute: {call.Name}", TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
-                    new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
-                }
-            },
-            PrimaryButtonText = "Approve",
-            CloseButtonText = "Deny",
-        };
+                "type_text" => $"Type text into focused window: \"{call.Args?.GetValueOrDefault("text")}\"",
+                "press_key" => $"Press key/shortcut: \"{call.Args?.GetValueOrDefault("keys")}\"",
+                "computer_use" => $"Run autonomous desktop task: \"{call.Args?.GetValueOrDefault("task")}\"",
+                "file_processor" => $"File operation: {call.Args?.GetValueOrDefault("action")} on {call.Args?.GetValueOrDefault("file_path")}",
+                "open_app" => $"Launch application: \"{call.Args?.GetValueOrDefault("app_name")}\"",
+                "browser_control" => $"Open browser URL: \"{call.Args?.GetValueOrDefault("url")}\"",
+                "undo" => "Undo the most recent assistant action.",
+                "shutdown_jarvis" => "Shut down ULTRON completely.",
+                "desktop_control" => $"Mouse/keyboard action: {call.Args?.GetValueOrDefault("action")}",
+                "window_manage" => $"Window action: {call.Args?.GetValueOrDefault("action")}",
+                "computer_settings" => $"System setting change: {call.Args?.GetValueOrDefault("action")}",
+                "send_message" => $"Send message to {call.Args?.GetValueOrDefault("receiver")} via {call.Args?.GetValueOrDefault("platform")}",
+                _ => $"Execute {call.Name}?"
+            };
 
-        if (dialog.XamlRoot == null) return false;
-        var result = await dialog.ShowAsync();
-        tcs.TrySetResult(result == ContentDialogResult.Primary);
-        return await tcs.Task;
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content?.XamlRoot,
+                Title = "TOOL APPROVAL REQUIRED",
+                Content = new StackPanel
+                {
+                    Spacing = 8,
+                    Children =
+                    {
+                        new TextBlock { Text = $"ULTRON wants to execute: {call.Name}", TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
+                        new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
+                    }
+                },
+                PrimaryButtonText = "Approve",
+                CloseButtonText = "Deny",
+            };
+
+            if (dialog.XamlRoot == null) return false;
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        finally
+        {
+            _approvalGate.Release();
+        }
     }
+
+    private readonly SemaphoreSlim _approvalGate = new(1, 1);
 
     /* ===================== UNDO LEDGER ===================== */
 
@@ -2879,12 +2948,15 @@ case "undo":
     {
         var appName = args.GetValueOrDefault("app_name")?.ToString() ?? "";
         if (string.IsNullOrEmpty(appName)) return "No app name supplied.";
+        if (Path.IsPathRooted(appName) || appName.Contains(Path.DirectorySeparatorChar) || appName.Contains(Path.AltDirectorySeparatorChar))
+            return "Only registered application names are allowed.";
         try
         {
             var exe = ResolveAppPath(appName);
+            if (string.IsNullOrEmpty(exe)) return $"Application '{appName}' was not found in the registered app catalog.";
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = exe ?? appName,
+                FileName = exe,
                 UseShellExecute = true,
             };
             System.Diagnostics.Process.Start(psi);
@@ -2964,8 +3036,7 @@ case "undo":
         var name = appName.Trim().TrimEnd('.');
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        // Already a full path?
-        if (File.Exists(name)) return name;
+        if (File.Exists(name)) return null;
 
         // App name with/without extension
         var stem = name;
@@ -3148,11 +3219,14 @@ var (v, m) = before;
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
         if (action == "open_url" && !string.IsNullOrEmpty(url))
         {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                uri.Scheme is not ("http" or "https"))
+                return "Only absolute http or https URLs are allowed.";
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true };
+                var psi = new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true };
                 System.Diagnostics.Process.Start(psi);
-                return $"Opened {url}";
+                return $"Opened {uri.AbsoluteUri}";
             }
             catch (Exception ex) { return $"Failed: {ex.Message}"; }
         }
@@ -3170,12 +3244,39 @@ var (v, m) = before;
         return "Browser control: action not recognized or missing parameters.";
     }
 
+    private static bool TryValidateToolPath(string raw, out string fullPath, out string error)
+    {
+        fullPath = "";
+        error = "";
+        if (string.IsNullOrWhiteSpace(raw)) { error = "A path is required."; return false; }
+        if (raw.StartsWith("\\\\", StringComparison.Ordinal) || raw.StartsWith("//", StringComparison.Ordinal) || raw.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            error = "UNC and device paths are not allowed.";
+            return false;
+        }
+        try { fullPath = Path.GetFullPath(raw); }
+        catch { error = "Invalid path."; return false; }
+        var profile = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
+            .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!fullPath.StartsWith(profile, StringComparison.OrdinalIgnoreCase) || fullPath.Length <= profile.Length)
+        {
+            error = "File operations are limited to files inside your user profile.";
+            return false;
+        }
+        return true;
+    }
+
     private async Task<string> HandleFileProcessorAsync(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var filePath = args.GetValueOrDefault("file_path")?.ToString() ?? "";
         var content = args.GetValueOrDefault("content")?.ToString() ?? "";
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
+        var validatedPath = filePath;
+        if (!string.IsNullOrEmpty(filePath) &&
+            !TryValidateToolPath(filePath, out validatedPath, out var pathError))
+            return $"{action}: {pathError}";
+        if (!string.IsNullOrEmpty(filePath)) filePath = validatedPath;
 
         switch (action.ToLowerInvariant())
         {
@@ -3184,6 +3285,8 @@ var (v, m) = before;
                 if (!File.Exists(filePath)) return $"File not found: {filePath}";
                 try
                 {
+                    if (new FileInfo(filePath).Length > 10L * 1024 * 1024)
+                        return "read refused: file exceeds 10 MB.";
                     var bytes = await File.ReadAllBytesAsync(filePath);
                     // Text files: return as-is. Binary: describe.
                     var text = SafeAsText(bytes);
@@ -3197,6 +3300,8 @@ var (v, m) = before;
                 if (string.IsNullOrEmpty(filePath)) return "write: missing file_path.";
                 Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
                 var hadOriginal = File.Exists(filePath);
+                if (hadOriginal && new FileInfo(filePath).Length > 10L * 1024 * 1024)
+                    return "write refused: existing file exceeds 10 MB.";
                 var original = hadOriginal ? await File.ReadAllTextAsync(filePath) : null;
                 await File.WriteAllTextAsync(filePath, content);
                 PushUndo($"file write({filePath})", () =>
@@ -3223,6 +3328,9 @@ var (v, m) = before;
                            ?? args.GetValueOrDefault("target")?.ToString() ?? "";
                 if (string.IsNullOrEmpty(filePath)) return $"{action}: missing file_path (source).";
                 if (string.IsNullOrEmpty(dest)) return $"{action}: missing destination.";
+                if (!TryValidateToolPath(dest, out var validatedDest, out var destError))
+                    return $"{action}: {destError}";
+                dest = validatedDest;
                 if (!File.Exists(filePath) && !Directory.Exists(filePath))
                     return $"{action}: source not found: {filePath}";
                 if (File.Exists(dest) || Directory.Exists(dest))
@@ -3250,6 +3358,9 @@ var (v, m) = before;
                            ?? args.GetValueOrDefault("target")?.ToString() ?? "";
                 if (string.IsNullOrEmpty(filePath)) return "copy: missing file_path (source).";
                 if (string.IsNullOrEmpty(dest)) return "copy: missing destination.";
+                if (!TryValidateToolPath(dest, out var validatedDest, out var destError))
+                    return $"copy: {destError}";
+                dest = validatedDest;
                 if (!File.Exists(filePath) && !Directory.Exists(filePath))
                     return $"copy: source not found: {filePath}";
                 if (File.Exists(dest) || Directory.Exists(dest))

@@ -10,6 +10,7 @@ public sealed class AppSettings
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Ultron");
 
     private static readonly string ConfigPath = Path.Combine(BaseDir, "config.dat");
+    private static bool _configCorrupt;
 
     public string ZenApiKey { get; set; } = ""; // legacy, kept for migration
     public string GeminiApiKey { get; set; } = "";
@@ -52,6 +53,7 @@ public sealed class AppSettings
 
     // Redact API keys/tokens before any text is written to the local memory store.
     public bool MemoryRedactSecrets { get; set; } = true;
+    public bool MicMuted { get; set; }
 
     // Log verbosity: "Error", "Warn", "Info", "Debug". Everything below is filtered out.
     public string LogLevel { get; set; } = "Info";
@@ -111,19 +113,37 @@ public static AppSettings Load()
                                       s.TelegramPhone.Trim();
                     s.TelegramCallTarget = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TARGET")?.Trim() ??
                                            s.TelegramCallTarget.Trim();
-                    s.TelegramCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED") is { } evCall
-                                        && evCall.Trim() is "1" or "true";
-                    s.CallFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED") is { } evFb
-                                        && evFb.Trim() is "1" or "true";
+                     var loadedCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED");
+                     if (loadedCallEnabled is not null)
+                         s.TelegramCallEnabled = ParseBool(loadedCallEnabled);
+                     var loadedFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED");
+                     if (loadedFallbackEnabled is not null)
+                         s.CallFallbackEnabled = ParseBool(loadedFallbackEnabled);
                     int.TryParse(Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_THRESHOLD"), out var thr);
                     if (thr > 0) s.CallFallbackThresholdSeconds = thr;
                     s.CallFallbackChatId = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_CHAT_ID")?.Trim() ??
                                           s.CallFallbackChatId.Trim();
-                    return s;
+                     _configCorrupt = false;
+                     return s;
                 }
             }
         }
-        catch { }
+        catch (JsonException)
+        {
+            _configCorrupt = true;
+        }
+        catch (CryptographicException)
+        {
+            _configCorrupt = false;
+        }
+        catch (IOException)
+        {
+            _configCorrupt = false;
+        }
+        catch
+        {
+            _configCorrupt = false;
+        }
         var fresh = new AppSettings();
         fresh.ZenApiKey = Environment.GetEnvironmentVariable("ZEN_API_KEY")?.Trim() ?? "";
         fresh.GeminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY")?.Trim() ?? "";
@@ -133,10 +153,12 @@ public static AppSettings Load()
         fresh.TelegramApiHash = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_API_HASH")?.Trim() ?? "";
         fresh.TelegramPhone = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_PHONE")?.Trim() ?? "";
         fresh.TelegramCallTarget = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_TARGET")?.Trim() ?? "";
-        fresh.TelegramCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED") is { } evC
-                                    && evC.Trim() is "1" or "true";
-        fresh.CallFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED") is { } evFb2
-                                    && evFb2.Trim() is "1" or "true";
+         var freshCallEnabled = Environment.GetEnvironmentVariable("ULTRON_TELEGRAM_ENABLED");
+         if (freshCallEnabled is not null)
+             fresh.TelegramCallEnabled = ParseBool(freshCallEnabled);
+         var freshFallbackEnabled = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_ENABLED");
+         if (freshFallbackEnabled is not null)
+             fresh.CallFallbackEnabled = ParseBool(freshFallbackEnabled);
         int.TryParse(Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_THRESHOLD"), out var thr2);
         if (thr2 > 0) fresh.CallFallbackThresholdSeconds = thr2;
         fresh.CallFallbackChatId = Environment.GetEnvironmentVariable("ULTRON_CALL_FALLBACK_CHAT_ID")?.Trim() ?? "";
@@ -145,9 +167,25 @@ public static AppSettings Load()
 
     public void Save()
     {
+        if (_configCorrupt)
+        {
+            var quarantine = ConfigPath + ".corrupt-" + DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            if (File.Exists(ConfigPath)) File.Move(ConfigPath, quarantine, true);
+            _configCorrupt = false;
+        }
         Directory.CreateDirectory(BaseDir);
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this));
-        File.WriteAllBytes(ConfigPath, ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser));
+        var protectedBytes = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
+        var temporary = Path.Combine(BaseDir, $".{Path.GetRandomFileName()}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, protectedBytes);
+            File.Move(temporary, ConfigPath, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     public void SetPin(string pin)
@@ -158,6 +196,12 @@ public static AppSettings Load()
     public bool VerifyPin(string pin)
     {
         return !string.IsNullOrEmpty(pin) && !string.IsNullOrEmpty(PinHash) && HashPin(pin) == PinHash;
+    }
+
+    private static bool ParseBool(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant();
+        return normalized is "1" or "true" or "yes" or "on";
     }
 
     public static string HashPin(string pin)
