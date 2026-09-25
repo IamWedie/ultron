@@ -1,5 +1,29 @@
 # ULTRON Proactive — Task List
 
+## Remediation pass — completed 2026-09-25
+
+- [x] **IPC / session lifecycle:** one restart-safe stdin reader, no-key startup, bounded
+      messages/queues, input validation, deterministic shutdown, safe `open_app`/`undo` approval.
+- [x] **Mic + VAD:** bridge initialization, 16k→48k routing, 512-sample VAD chunks,
+      duplicate/retrigger fix, interruption + turn-end DSP drain/reset.
+- [x] **Telegram transport:** `send_external_frame` replaces the unsupported named-pipe
+      TX, 10ms/480-sample frame pacing, playback source after connect, separate Gemini/mic
+      TX buffers, continuous silence frames, thread-safe handoff, peer access-hash binding.
+- [x] **Call cleanup:** bounded native disconnect, stale-event filtering, connection-state
+      monitor, `finally` guards, config-driven calls enabled (off by default), atomic
+      session save, invalid-credential handling.
+- [x] **Persistence / model I/O:** shared atomic `json_store`, corruption handling, model
+      computer-action schema validation, document containment/atomic generation, formula
+      injection guard, memory/prompt bounds.
+- [x] **C# boundaries:** `open_app`/`browser_control`/per-action approvals on the UI thread,
+      user-profile path guard, read/write byte caps, http/https URL check, mic-mute
+      persistence + replay, no-key backend start, stale-process guards, restart race fix.
+- [x] **CI + tests:** Python compileall/pyflakes/import checks wired into GitHub Actions,
+      31 Python regression tests, 57/57 C# tests, no-key IPC smoke test.
+
+- [ ] **Follow-ups:** live Telegram call acceptance; `file_processor` per-operation allowlist
+      with reparse-safe handles; hashed Python dependency lockfile; GitHub Actions SHA pins.
+
 ## Phase 1 — Remote reach (foundation)
 
 - [x] **T1: Outreach router (C#)**
@@ -59,7 +83,7 @@
 - [x] C2: backend IPC handlers `telegram_login`/`telegram_logout`/`telegram_status`/`telegram_code`
       + events (`telegram_status`, `telegram_code_required`, `telegram_code_result`); `telegram` capability in hello
 - [x] C3: C# AppSettings + GeminiBackend IPC methods/events + env passthrough
-- [x] C4: tests — python selftests 9/9, C# 55/55, build 0 warnings, relaunch clean
+- [x] C4: tests — python regression suite 31/31, C# 57/57, build 0 errors, relaunch clean
 - [x] C4-fix: login bugfix — `send_code_request` returns `auth.SentCode`, not the hash string;
       `sign_in` now gets `.phone_code_hash` (previously: `ValueError` then `TypeError`).
       One live Telethon client is reused across code request + submit.
@@ -71,7 +95,7 @@
       — `resolve_target()` validates a real (non-bot) User entity, caches user id,
       emits `telegram_target_result`; IPC `telegram_resolve_target`; C# settings
       `TelegramCallTarget`/`TelegramCallUserId` + env override; "Resolve Target" button
-      in settings; py selftests 11/11, C# 57/57
+      in settings; py regression suite 31/31, C# 57/57
 - [ ] C5b: LIVE resolve acceptance — enter `@yourusername`, press Resolve Target,
       confirm "Target resolved" + cached user id (gated on user creds)
 
@@ -92,6 +116,11 @@
 - [x] C8.3: Guardian wired to call_start with payload (away mode + high-priority)
 - [x] C8.4: UI status display + fallback notification in MainWindow
 - [x] C8.5: Config settings (CallFallbackEnabled, CallFallbackThresholdSeconds, CallFallbackChatId) + env overrides
-- [ ] C8.6: InCallAudioBridge (48k<->16k/24k adapters) + mic bypass + barge-in
+- [x] C8.6: InCallAudioBridge (48k<->16k/24k adapters) + mic bypass + barge-in
+      — external-frame TX, 10ms/480-sample pacing, playback source, separate Gemini/mic
+        buffers, continuous silence frames, thread-safe handoff (unit-tested; live call
+        acceptance still tracked under C6/C10)
 - [ ] C9: ring/accept/dial UI, tools live in-call, secure auth UX
 - [ ] C10: hang-up/disconnect/concurrent/reconnect edge cases + tests
+  - [x] Bounded native cleanup, connection-state monitor, stale-event filtering, `finally` guards
+  - [ ] Live hang-up, simultaneous-call, and reconnect acceptance

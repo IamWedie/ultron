@@ -114,3 +114,33 @@ Twilio call bridge designed in as an optional, flag-gated upgrade.
 - **Reply channel:** Telegram bot vs WhatsApp vs SMS — plan defaults to Telegram bot + SMS fallback; pending user preference for a bot token.
 - **Motion sensor source:** camera index / sensitivity default; user confirmed on-device analysis OK (never saved).
 - **Call bridge provider/budget:** TBD before Phase 4 (default Twilio, monthly cap).
+
+---
+
+## Remediation Pass — Backend, IPC, and Telegram Hardening (2026-09-25)
+
+This section is additive; the proactive-assistant roadmap above remains open.
+
+### Completed
+
+- [x] Repaired the IPC stdout path and consolidated Python stdin handling into one restart-safe reader.
+- [x] Added no-API-key startup, bounded IPC messages/queues, boolean/numeric validation, and a persistent session supervisor.
+- [x] Fixed microphone bridge initialization, sample-rate conversion, VAD chunk duplication/retrigger behavior, and DSP drain/reset handling.
+- [x] Replaced the unsupported Telegram named-pipe transport with paced 10 ms `ntgcalls` external frames, playback source setup, peer binding, and bounded cleanup.
+- [x] Added atomic JSON persistence, corruption guards, model-input validation, document containment, and durable task/document limits.
+- [x] Hardened C# backend lifecycle, approval dispatch, application/URL launch restrictions, mute propagation, and file-tool bounds.
+- [x] Added Python regression tests (31) and wired Python checks into GitHub Actions.
+
+### Verification
+
+- [x] `python backend/ci.py`: compileall, pyflakes, isolated imports, and unit tests all pass.
+- [x] `dotnet build -c Debug --nologo`: 0 errors.
+- [x] `dotnet test tools/Tests/Ultron.Tests.csproj --nologo`: 57/57 pass.
+- [x] No-key IPC smoke test completes cleanly.
+
+### Remaining Risks / Follow-ups
+
+- [ ] Run a live Telegram call acceptance test; the external-frame and playback path is unit-tested but not yet exercised against a real peer.
+- [ ] Tighten `file_processor` from a user-profile guard to a per-operation allowlist with reparse-point-safe handles.
+- [ ] Commit a hashed Python dependency lockfile and pin GitHub Actions to immutable revisions.
+- [ ] Complete live login/resolve acceptance and the remaining call UX items in the Telegram workstream below.
