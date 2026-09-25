@@ -344,8 +344,6 @@ class SpikeRunner:
             self.start_ts = time.time()
             user_id = await self.place_call(client)
 
-            accepted_task = asyncio.create_task(self.accepted.wait())
-            discarded_task = asyncio.create_task(self.discarded.wait())
             timeout_task = asyncio.create_task(asyncio.sleep(self.timeout))
 
             while True:
@@ -365,7 +363,6 @@ class SpikeRunner:
             log(f"Call live. Tone playing for up to {self.seconds}s, "
                 f"speak so I can log RX PCM. Hangup on phone cancels.")
             sleep = asyncio.create_task(asyncio.sleep(self.seconds))
-            prev_discard = False
             while not sleep.done() and not self.discarded.is_set():
                 await asyncio.sleep(0.2)
             if self.discarded.is_set():

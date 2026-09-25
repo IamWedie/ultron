@@ -4,7 +4,8 @@
 Runs:
 1. compileall - byte-compile all .py files (catches syntax errors)
 2. pyflakes - static analysis (undefined names, unused imports, etc.)
-3. Import test - verify all modules can be imported without errors
+3. Isolated import test - verify all modules can be imported
+4. Unit tests - run backend regression tests
 """
 
 import subprocess
@@ -46,15 +47,42 @@ def run_import_test() -> tuple[bool, str]:
         "guardian",
         "monitor",
         "productivity",
+        "json_store",
         "tools_extra",
+        "call_audio_bridge",
+        "spike_telegram_call",
+        "ci",
     ]
     errors = []
     for mod in modules:
-        try:
-            __import__(mod)
-        except Exception as e:
-            errors.append(f"{mod}: {e}")
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {mod}"],
+            cwd=BACKEND_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            errors.append(f"{mod}: {result.stderr or result.stdout}")
     return len(errors) == 0, "\n".join(errors)
+
+
+def run_unit_tests() -> tuple[bool, str]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            str(BACKEND_DIR / "tests"),
+            "-p",
+            "test_*.py",
+        ],
+        cwd=BACKEND_DIR,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0, result.stdout + result.stderr
 
 
 def main():
@@ -67,7 +95,7 @@ def main():
 
     all_passed = True
 
-    print("\n[1/3] Running compileall...")
+    print("\n[1/4] Running compileall...")
     ok, output = run_compileall()
     if ok:
         print("  PASS")
@@ -76,7 +104,7 @@ def main():
         print(output)
         all_passed = False
 
-    print("\n[2/3] Running pyflakes...")
+    print("\n[2/4] Running pyflakes...")
     ok, output = run_pyflakes()
     if ok:
         print("  PASS")
@@ -85,8 +113,17 @@ def main():
         print(output)
         all_passed = False
 
-    print("\n[3/3] Running import test...")
+    print("\n[3/4] Running import test...")
     ok, output = run_import_test()
+    if ok:
+        print("  PASS")
+    else:
+        print("  FAIL")
+        print(output)
+        all_passed = False
+
+    print("\n[4/4] Running unit tests...")
+    ok, output = run_unit_tests()
     if ok:
         print("  PASS")
     else:

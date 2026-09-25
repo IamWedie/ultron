@@ -1,12 +1,12 @@
 """InCallAudioBridge: Real-time audio bridge between Telegram VoIP (48 kHz mono)
 and Gemini Live (16 kHz in / 24 kHz out).
 
-Uses Windows named pipe with ntgcalls MediaSource.EXTERNAL for TX.
-RX uses ntgcalls on_frames callback.
+    Uses ntgcalls MediaSource.EXTERNAL with paced external frames for TX.
+    RX uses ntgcalls on_frames callback.
 
 Responsibilities:
 - Resample Telegram RX (48 kHz) -> Gemini mic queue (16 kHz)
-- Resample Gemini output (24 kHz) -> Telegram TX (48 kHz) via named pipe
+- Resample Gemini output (24 kHz) -> Telegram TX (48 kHz) via external frames
 - Mic bypass: route system mic to Telegram instead of Gemini during call
 - Barge-in: detect remote speech, drain Gemini queue to prevent overlap
 - Voice activity detection on both directions for smart gating
@@ -15,11 +15,6 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
-import ctypes
-from ctypes import wintypes
-import math
-import threading
-import uuid
 from typing import Awaitable, Callable, Optional
 
 import numpy as np
@@ -34,10 +29,10 @@ RATIO_48_TO_16 = 1/3.0
 RATIO_24_TO_48 = 2.0
 
 # Frame sizes (ms)
-FRAME_MS = 20
-TELEGRAM_FRAME = int(TELEGRAM_SR * FRAME_MS / 1000)   # 960 samples
-GEMINI_IN_FRAME = int(GEMINI_IN_SR * FRAME_MS / 1000) # 320 samples
-GEMINI_OUT_FRAME = int(GEMINI_OUT_SR * FRAME_MS / 1000) # 480 samples
+FRAME_MS = 10
+TELEGRAM_FRAME = int(TELEGRAM_SR * FRAME_MS / 1000)   # 480 samples
+GEMINI_IN_FRAME = int(GEMINI_IN_SR * FRAME_MS / 1000) # 160 samples
+GEMINI_OUT_FRAME = int(GEMINI_OUT_SR * FRAME_MS / 1000) # 240 samples
 
 # VAD thresholds
 REMOTE_VAD_THRESHOLD = 0.02  # RMS threshold for remote speech detection
@@ -45,99 +40,6 @@ LOCAL_VAD_THRESHOLD = 0.01   # RMS threshold for local speech
 
 # Barge-in
 BARGE_IN_QUEUE_DRAIN_MS = 100  # ms of Gemini audio to drain on barge-in
-
-# Windows named pipe constants
-PIPE_ACCESS_DUPLEX = 0x00000003
-PIPE_TYPE_BYTE = 0x00000000
-PIPE_WAIT = 0x00000000
-PIPE_UNLIMITED_INSTANCES = 255
-
-
-class AudioResampler:
-    """High-quality linear resampler using numpy."""
-    
-    @staticmethod
-    def resample_linear(audio: np.ndarray, ratio: float) -> np.ndarray:
-        """Fast linear interpolation resampling."""
-        if ratio == 1.0:
-            return audio
-        n_out = int(len(audio) * ratio)
-        if n_out == 0:
-            return np.array([], dtype=audio.dtype)
-        x_old = np.arange(len(audio))
-        x_new = np.linspace(0, len(audio) - 1, n_out)
-        return np.interp(x_new, x_old, audio).astype(audio.dtype)
-
-
-class NamedPipeWriter:
-    """Windows named pipe writer for ntgcalls EXTERNAL source."""
-    
-    def __init__(self, pipe_name: str):
-        self.pipe_name = pipe_name
-        self.pipe_handle = None
-        self._connected = False
-        self._lock = threading.Lock()
-        
-        # Windows API
-        self.kernel32 = ctypes.windll.kernel32
-        self.PIPE_ACCESS_DUPLEX = 0x00000003
-        self.PIPE_TYPE_BYTE = 0x00000000
-        self.PIPE_WAIT = 0x00000000
-    
-    def create_and_wait(self) -> bool:
-        """Create named pipe and wait for ntgcalls to connect."""
-        with self._lock:
-            if self.pipe_handle is not None:
-                return True
-            
-            self.pipe_handle = self.kernel32.CreateNamedPipeW(
-                self.pipe_name,
-                self.PIPE_ACCESS_DUPLEX,
-                0,  # PIPE_TYPE_BYTE | PIPE_WAIT
-                1,  # max instances
-                65536,  # out buffer
-                65536,  # in buffer
-                0,  # default timeout
-                None  # security attributes
-            )
-            
-            if self.pipe_handle == -1:
-                err = ctypes.GetLastError()
-                print(f"[NamedPipe] CreateNamedPipe failed: {err}")
-                return False
-            
-            print(f"[NamedPipe] Created pipe {self.pipe_name}, waiting for connection...")
-            
-            # Wait for connection in background thread
-            def wait_and_connect():
-                result = self.kernel32.ConnectNamedPipe(self.pipe_handle, None)
-                err = ctypes.GetLastError()
-                with self._lock:
-                    self._connected = (result != 0 or err == 535)  # 535 = ERROR_PIPE_CONNECTED
-                    if self._connected:
-                        print(f"[NamedPipe] Client connected!")
-            
-            threading.Thread(target=wait_and_connect, daemon=True).start()
-            return True
-    
-    def write(self, data: bytes) -> bool:
-        """Write audio data to the pipe."""
-        with self._lock:
-            if self.pipe_handle is None or self.pipe_handle == -1 or not self._connected:
-                return False
-            
-            written = wintypes.DWORD()
-            result = self.kernel32.WriteFile(
-                self.pipe_handle, data, len(data), ctypes.byref(written), None
-            )
-            return result != 0
-    
-    def close(self) -> None:
-        with self._lock:
-            if self.pipe_handle is not None and self.pipe_handle != -1:
-                self.kernel32.CloseHandle(self.pipe_handle)
-                self.pipe_handle = None
-                self._connected = False
 
 
 class AudioResampler:
@@ -162,7 +64,7 @@ class InCallAudioBridge:
     
     Flow:
     Telegram RX (48k) -> on_frames callback -> resample 48->16k -> VAD -> _mic_queue -> Gemini
-    Gemini OUT (24k) -> _audio_out_queue -> resample 24->48k -> named pipe -> Telegram TX
+    Gemini OUT (24k) -> _audio_out_queue -> resample 24->48k -> external frames -> Telegram TX
     
     Mic bypass: system mic -> Telegram (bypasses Gemini entirely during call)
     Barge-in: remote speech detected -> drain _audio_out_queue
@@ -170,21 +72,24 @@ class InCallAudioBridge:
     
     def __init__(
         self,
-        mic_queue: asyncio.Queue,           # Gemini input queue (16k int16 PCM)
-        audio_out_queue: asyncio.Queue,     # Gemini output queue (24k int16 PCM)
+        mic_queue: asyncio.Queue,
+        audio_out_queue: asyncio.Queue,
         on_remote_speech: Optional[Callable[[bool], None]] = None,
         vad_model_path: Optional[str] = None,
+        send_frame: Optional[Callable[[bytes], Awaitable[None]]] = None,
     ):
         self._mic_queue = mic_queue
         self._audio_out_queue = audio_out_queue
         self._on_remote_speech = on_remote_speech
+        self._send_frame = send_frame
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._gemini_tx_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._mic_tx_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._gemini_tx_buffer = bytearray()
+        self._mic_tx_buffer = bytearray()
         
         # Audio buffers
         self._rx_buffer = bytearray()      # Telegram RX (48k) -> resample -> mic_queue
-        
-        # Named pipe for Telegram TX
-        self._pipe_name = fr"\\.\pipe\ultron_audio_{uuid.uuid4().hex[:8]}"
-        self._pipe_writer: Optional[NamedPipeWriter] = None
         
         # State
         self._running = False
@@ -209,28 +114,19 @@ class InCallAudioBridge:
         # Stats
         self._stats = {
             "rx_frames": 0, "tx_frames": 0,
-            "barge_ins": 0, "bytes_rx": 0, "bytes_tx": 0
+            "barge_ins": 0, "bytes_rx": 0, "bytes_tx": 0,
+            "dropped_frames": 0
         }
     
-    def get_pipe_name(self) -> str:
-        """Get the named pipe name for ntgcalls EXTERNAL source."""
-        return self._pipe_name
-    
     async def start(self) -> None:
-        """Start the audio bridge and named pipe."""
+        """Start the audio bridge and frame sender."""
         if self._running:
             return
+        if self._send_frame is None:
+            raise RuntimeError("Telegram frame sender is not configured")
         self._running = True
         self._call_active = True
-        
-        # Create named pipe
-        self._pipe_writer = NamedPipeWriter(self._pipe_name)
-        if not self._pipe_writer.create_and_wait():
-            raise RuntimeError("Failed to create named pipe")
-        
-        # Wait a bit for connection
-        await asyncio.sleep(0.5)
-        
+        self._loop = asyncio.get_running_loop()
         self._rx_task = asyncio.create_task(self._rx_loop())
         self._tx_task = asyncio.create_task(self._tx_loop())
         self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -248,35 +144,101 @@ class InCallAudioBridge:
                 except asyncio.CancelledError:
                     pass
         
-        if self._pipe_writer:
-            self._pipe_writer.close()
-            self._pipe_writer = None
+        self._mic_bypassed = False
+        self._gemini_tx_buffer.clear()
+        self._mic_tx_buffer.clear()
+        for queue in (self._gemini_tx_queue, self._mic_tx_queue):
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
         
         self._rx_task = self._tx_task = self._monitor_task = None
+        self._loop = None
     
-    def feed_telegram_rx(self, pcm_48k: bytes) -> None:
-        """Called from ntgcalls on_frames callback (PLAYBACK mode).
-        Receives 48kHz mono int16 PCM from Telegram."""
-        if not self._call_active:
+    def _enqueue_tx_threadsafe(self, queue: asyncio.Queue, data: bytes) -> None:
+        loop = self._loop
+        if loop is None:
+            self._enqueue_tx(queue, data)
             return
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is loop:
+            self._enqueue_tx(queue, data)
+        else:
+            loop.call_soon_threadsafe(self._enqueue_tx, queue, data)
+
+    def _append_rx_threadsafe(self, pcm_48k: bytes) -> None:
+        max_buffer_bytes = TELEGRAM_FRAME * 2 * 10
+        if len(self._rx_buffer) + len(pcm_48k) > max_buffer_bytes:
+            overflow = len(self._rx_buffer) + len(pcm_48k) - max_buffer_bytes
+            del self._rx_buffer[:overflow]
+            self._stats["dropped_frames"] += 1
         self._rx_buffer.extend(pcm_48k)
         self._stats["bytes_rx"] += len(pcm_48k)
+
+    def feed_telegram_rx(self, pcm_48k: bytes) -> None:
+        if not self._call_active:
+            return
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is loop:
+            self._append_rx_threadsafe(pcm_48k)
+        else:
+            loop.call_soon_threadsafe(self._append_rx_threadsafe, pcm_48k)
     
+    @property
+    def mic_bypassed(self) -> bool:
+        return self._mic_bypassed
+
     def set_mic_bypass(self, enabled: bool) -> None:
         """Enable/disable mic bypass (route system mic to Telegram instead of Gemini)."""
-        self._mic_bypassed = enabled
+        self._mic_bypassed = bool(enabled)
     
-    def feed_local_mic(self, pcm_48k: bytes) -> None:
-        """Feed local microphone audio directly to Telegram via named pipe (mic bypass)."""
+    def feed_local_mic(self, pcm_16k: bytes) -> None:
+        """Queue local microphone audio for Telegram at 48 kHz."""
         if not self._call_active or not self._mic_bypassed:
             return
-        # Resample 48k -> 48k (no resampling needed, just write to pipe)
-        # The pipe expects 48kHz mono int16 PCM
-        if self._pipe_writer and self._pipe_writer.write(pcm_48k):
-            self._stats["tx_frames"] += 1
-            self._stats["bytes_tx"] += len(pcm_48k)
-        else:
-            print("[AudioBridge] Local mic pipe write failed (not connected?)")
+        usable = pcm_16k[:len(pcm_16k) - (len(pcm_16k) % 2)]
+        if not usable:
+            return
+        samples = np.frombuffer(usable, dtype=np.int16).astype(np.float32) / 32768.0
+        resampled = AudioResampler.resample_linear(samples, TELEGRAM_SR / GEMINI_IN_SR)
+        pcm_48k = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        self._enqueue_tx_threadsafe(self._mic_tx_queue, pcm_48k)
+
+    def feed_gemini_audio(self, pcm_24k: bytes) -> None:
+        """Queue Gemini output for Telegram at 48 kHz."""
+        if not self._call_active:
+            return
+        usable = pcm_24k[:len(pcm_24k) - (len(pcm_24k) % 2)]
+        if not usable:
+            return
+        samples = np.frombuffer(usable, dtype=np.int16).astype(np.float32) / 32768.0
+        resampled = AudioResampler.resample_linear(samples, RATIO_24_TO_48)
+        pcm_48k = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        self._enqueue_tx_threadsafe(self._gemini_tx_queue, pcm_48k)
+
+    def _enqueue_tx(self, queue: asyncio.Queue, data: bytes) -> None:
+        try:
+            queue.put_nowait(data)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                self._stats["dropped_frames"] += 1
     
     def get_stats(self) -> dict:
         return dict(self._stats)
@@ -330,12 +292,19 @@ class InCallAudioBridge:
                 # Convert back to int16 for Gemini queue
                 pcm_out = (pcm_16k * 32767).astype(np.int16).tobytes()
                 
-                # Push to Gemini mic queue
-                try:
-                    self._mic_queue.put_nowait(pcm_out)
-                    self._stats["rx_frames"] += 1
-                except asyncio.QueueFull:
-                    pass
+                if self._mic_queue is not None:
+                    try:
+                        self._mic_queue.put_nowait(pcm_out)
+                        self._stats["rx_frames"] += 1
+                    except asyncio.QueueFull:
+                        try:
+                            self._mic_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        try:
+                            self._mic_queue.put_nowait(pcm_out)
+                        except asyncio.QueueFull:
+                            self._stats["dropped_frames"] += 1
                     
             except asyncio.CancelledError:
                 break
@@ -344,73 +313,102 @@ class InCallAudioBridge:
                 await asyncio.sleep(0.01)
     
     # ------------------------------------------------------------------------
-    # TX Loop: Gemini OUT (24k) -> Resample 24->48k -> named pipe -> Telegram
+    # TX Loop: 48 kHz frames -> ntgcalls external source
     # ------------------------------------------------------------------------
     
     async def _tx_loop(self) -> None:
-        """Process outgoing Gemini audio to Telegram via named pipe."""
+        """Send paced 48 kHz frames through ntgcalls."""
+        frame_bytes = TELEGRAM_FRAME * 2
+        loop = asyncio.get_running_loop()
+        next_send = loop.time()
         while self._running:
+            gemini_get = asyncio.create_task(self._gemini_tx_queue.get())
+            mic_get = asyncio.create_task(self._mic_tx_queue.get())
             try:
-                # Get audio from Gemini output queue
-                pcm_24k = await asyncio.wait_for(
-                    self._audio_out_queue.get(),
-                    timeout=0.1
+                done, pending = await asyncio.wait(
+                    [gemini_get, mic_get],
+                    timeout=FRAME_MS / 1000.0,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                
-                if not self._call_active:
-                    continue
-                
-                # Convert to float32
-                pcm_24k_f = np.frombuffer(pcm_24k, dtype=np.int16).astype(np.float32) / 32768.0
-                
-                # Resample 24k -> 48k (ratio 2.0)
-                pcm_48k = AudioResampler.resample_linear(pcm_24k_f, RATIO_24_TO_48)
-                
-                # Local VAD (optional: could gate outgoing)
-                rms = np.sqrt(np.mean(pcm_48k ** 2))
-                is_local_speech = rms > LOCAL_VAD_THRESHOLD
-                if is_local_speech:
-                    self._local_vad_frames += 1
-                else:
-                    self._local_vad_frames = 0
-                
-                # Convert to int16
-                pcm_out = (pcm_48k * 32767).astype(np.int16).tobytes()
-                
-                # Write to named pipe
-                if self._pipe_writer and self._pipe_writer.write(pcm_out):
-                    self._stats["tx_frames"] += 1
-                    self._stats["bytes_tx"] += len(pcm_out)
-                else:
-                    print("[AudioBridge] Pipe write failed (not connected?)")
-                    
-            except asyncio.TimeoutError:
-                continue
             except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"[AudioBridge] TX loop error: {e}")
-                await asyncio.sleep(0.01)
+                gemini_get.cancel()
+                mic_get.cancel()
+                await asyncio.gather(gemini_get, mic_get, return_exceptions=True)
+                raise
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if not done:
+                now = loop.time()
+                if next_send <= now and self._send_frame is not None:
+                    try:
+                        await self._send_frame(bytes(frame_bytes))
+                        self._stats["tx_frames"] += 1
+                        self._stats["bytes_tx"] += frame_bytes
+                        next_send = now + FRAME_MS / 1000.0
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        self._running = False
+                        print(f"[AudioBridge] TX silence frame failed: {e}")
+                continue
+            chunks = []
+            if gemini_get in done:
+                chunks.append((self._gemini_tx_buffer, gemini_get.result()))
+            if mic_get in done:
+                chunks.append((self._mic_tx_buffer, mic_get.result()))
+            for buffer, chunk in chunks:
+                buffer.extend(chunk)
+                while len(buffer) >= frame_bytes and self._running:
+                    now = loop.time()
+                    if next_send < now:
+                        next_send = now + FRAME_MS / 1000.0
+                    delay = next_send - now
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    frame = bytes(buffer[:frame_bytes])
+                    del buffer[:frame_bytes]
+                    if self._send_frame is None:
+                        self._running = False
+                        break
+                    try:
+                        await self._send_frame(frame)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        self._running = False
+                        print(f"[AudioBridge] TX frame send failed: {e}")
+                        break
+                    self._stats["tx_frames"] += 1
+                    self._stats["bytes_tx"] += len(frame)
+                    next_send += FRAME_MS / 1000.0
     
     # ------------------------------------------------------------------------
     # Barge-in Handling
     # ------------------------------------------------------------------------
     
     async def _handle_barge_in(self) -> None:
-        """Remote speech started - drain Gemini output queue to prevent overlap."""
+        """Remote speech started - drop queued assistant audio."""
         self._stats["barge_ins"] += 1
-        print(f"[AudioBridge] Barge-in detected! Draining Gemini queue...")
-        
-        # Drain the audio output queue (Gemini's response)
+        print("[AudioBridge] Barge-in detected! Draining Gemini queue...")
         drained = 0
         drain_bytes = int(GEMINI_OUT_SR * 2 * BARGE_IN_QUEUE_DRAIN_MS / 1000)
-        while not self._audio_out_queue.empty() and drained < drain_bytes:
+        if self._audio_out_queue is not None:
+            while not self._audio_out_queue.empty() and drained < drain_bytes:
+                try:
+                    chunk = self._audio_out_queue.get_nowait()
+                    drained += len(chunk)
+                except asyncio.QueueEmpty:
+                    break
+        self._gemini_tx_buffer.clear()
+        while not self._gemini_tx_queue.empty():
             try:
-                chunk = self._audio_out_queue.get_nowait()
-                drained += len(chunk)
+                self._gemini_tx_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        
         print(f"[AudioBridge] Drained {drained} bytes from Gemini queue")
     
     # ------------------------------------------------------------------------

@@ -7,9 +7,10 @@ brief alert through the Live session.
 
 from __future__ import annotations
 
-import json
+import math
 import os
-from datetime import datetime
+
+import json_store
 
 try:
     import psutil
@@ -35,35 +36,46 @@ def config_path() -> str:
     return os.path.join(base, "Ultron", "guardian.json")
 
 
+_load_error = None
+
+
 def load_config() -> dict:
+    global _load_error
     cfg = _defaults()
     try:
-        with open(config_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            cfg.update({k: v for k, v in data.items() if k in cfg})
-    except Exception:
-        pass
+        data = json_store.load(config_path(), {})
+        _load_error = None
+    except json_store.CorruptStoreError as exc:
+        _load_error = str(exc)
+        return cfg
+    cfg.update({k: v for k, v in data.items() if k in cfg})
     return cfg
 
 
 def save_config(cfg: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
-        with open(config_path(), "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception:
-        pass
+    if _load_error:
+        raise RuntimeError(_load_error)
+    json_store.save(config_path(), cfg)
 
 
 def set_config(**kw) -> dict:
     cfg = load_config()
-    for k, v in kw.items():
-        if k in cfg:
-            try:
-                cfg[k] = float(v) if not isinstance(v, bool) else bool(v)
-            except (TypeError, ValueError):
-                cfg[k] = v
+    for key, value in kw.items():
+        if key not in cfg:
+            continue
+        if key in ("enabled", "reminders_enabled"):
+            cfg[key] = bool(value)
+            continue
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"{key} must be finite")
+        if key in ("cpu_threshold", "memory_threshold", "battery_low"):
+            if not 0 <= numeric <= 100:
+                raise ValueError(f"{key} must be between 0 and 100")
+        elif key in ("interval", "cooldown"):
+            if not 0 < numeric <= 86400:
+                raise ValueError(f"{key} must be between 0 and 86400")
+        cfg[key] = numeric
     save_config(cfg)
     return cfg
 

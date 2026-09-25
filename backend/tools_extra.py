@@ -5,8 +5,6 @@ Small "quality of life" tool ports from Mark-LII that need no UI:
 
 from __future__ import annotations
 
-import os
-
 # ────────────────────────────── audio devices ─────────────────────────────
 def list_input_devices() -> str:
     try:

@@ -16,6 +16,8 @@ internal overlap-add keeps pitch continuity across every block.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 SR = 24000          # Gemini Live receive rate (int16 mono)
@@ -68,6 +70,8 @@ class UltronVoice:
         # fractional resampler state (stage 2 of the pitch shift)
         self._rs_buf = np.zeros(0, dtype=np.float64)
         self._rs_pos = 0.0
+        self._input_samples = 0
+        self._byte_carry = b""
 
     def _build_eq(self):
         """Precompute the FFT-bin gain curve: bass shelf + dark high cut."""
@@ -83,19 +87,48 @@ class UltronVoice:
             bass_db=None, darken=None):
         if enabled is not None:
             self.enabled = bool(enabled)
+            if not self.enabled:
+                self.reset()
         if semitones is not None:
-            self.semitones = float(semitones)
+            value = float(semitones)
+            if not math.isfinite(value) or not -24.0 <= value <= 24.0:
+                raise ValueError("semitones must be between -24 and 24")
+            self.semitones = value
             self._ratio = float(2.0 ** (self.semitones / 12.0))
-            if self._ratio <= 0.0:
-                self._ratio = 1.0
             self._hop_out = float(PH) * self._ratio
         if chorus is not None:
-            self.chorus = float(chorus)
+            value = float(chorus)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError("chorus must be between 0 and 1")
+            self.chorus = value
         if bass_db is not None:
-            self.bass_db = float(bass_db)
+            value = float(bass_db)
+            if not math.isfinite(value) or not -24.0 <= value <= 24.0:
+                raise ValueError("bass_db must be between -24 and 24")
+            self.bass_db = value
         if darken is not None:
-            self.darken = float(darken)
+            value = float(darken)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError("darken must be between 0 and 1")
+            self.darken = value
         self._build_eq()
+
+    def reset(self):
+        self._prev_phase = None
+        self._out_phase = None
+        self._in = np.zeros(0, dtype=np.float64)
+        self._synth = np.zeros(PW * 2, dtype=np.float64)
+        self._norm = np.zeros(PW * 2, dtype=np.float64)
+        self._frames_done = 0
+        self._emitted_total = 0
+        self._processed = 0
+        self._rs_buf = np.zeros(0, dtype=np.float64)
+        self._rs_pos = 0.0
+        self._input_samples = 0
+        self._byte_carry = b""
+        self._dl[:] = 0.0
+        self._dl_pos = 0
+        self._fl_clock = 0
 
     # ── main entry ──────────────────────────────────────────────────────────
     def process(self, data: bytes | np.ndarray) -> bytes:
@@ -103,9 +136,14 @@ class UltronVoice:
         if not self.enabled or not len(data):
             return data
         if isinstance(data, (bytes, bytearray, memoryview)):
-            if len(data) % 2:
-                data = bytes(data[:-1])
+            combined = self._byte_carry + bytes(data)
+            usable = len(combined) - (len(combined) % 2)
+            self._byte_carry = combined[usable:]
+            data = combined[:usable]
+            if not data:
+                return b""
         x = np.frombuffer(data, dtype=np.int16).astype(np.float64) / 32768.0
+        self._input_samples += len(x)
         out = self._resample(self._run(x))
         return (np.clip(out, -0.999, 0.999) * 32767.0).astype(np.int16).tobytes()
 
@@ -126,55 +164,48 @@ class UltronVoice:
         return (np.clip(out, -0.999, 0.999) * 32767.0).astype(np.int16).tobytes()
 
     def flush_drain(self) -> bytes:
-        """Response-end drain. Emits the leftover input (including a padded
-        final frame so the last ~170 ms is NOT dropped) and drains the
-        resampler completely, resetting it for the next response."""
+        """Flush the response tail and reset all streaming state."""
         if not self.enabled:
             return b""
+        if self._frames_done == 0 and self._input_samples < PW:
+            data = (np.clip(self._in, -0.999, 0.999) * 32767.0).astype(np.int16).tobytes()
+            self.reset()
+            return data
         parts: list = []
-
         tail = np.ascontiguousarray(self._in)
         self._in = np.zeros(0)
         if len(tail):
-            s = self._run(tail)
-            if len(s):
-                parts.append(s)
-
-        # Padded final frame: process any < PW leftover so the response tail is heard.
+            rem = self._run(tail)
+            if len(rem):
+                parts.append(rem)
         if len(self._in):
             tail2 = np.ascontiguousarray(self._in)
             self._in = np.zeros(0)
-            frame = np.concatenate([tail2, np.zeros(PW - len(tail2))]) * self._win
-            X = np.fft.rfft(frame)
-            mag = np.abs(X)
-            phase = np.angle(X)
-            if self._prev_phase is not None:
-                delta = _princarg(phase - self._prev_phase - self._freq * PH)
-            else:
-                delta = np.zeros_like(phase)
-            self._prev_phase = phase
-            if self._out_phase is None:
-                self._out_phase = phase
-            self._out_phase = self._out_phase + self._freq * self._hop_out + delta
-            Y = mag * np.exp(1j * self._out_phase) * self._eq
-            voiced = np.fft.irfft(Y, n=PW) * self._win
-            i0 = int(self._frames_done * self._hop_out)
-            i1 = i0 + PW
-            if i1 > len(self._synth):
-                pad = i1 - len(self._synth)
-                self._synth = np.concatenate([self._synth, np.zeros(pad)])
-                self._norm = np.concatenate([self._norm, np.zeros(pad)])
-            self._synth[i0:i1] += voiced
-            self._norm[i0:i1] += self._win * self._win
-            self._frames_done += 1
-            rem = self._emit(int(self._frames_done * self._hop_out) - self._emitted_total)
+            rem = self._process_frame(np.concatenate([tail2, np.zeros(PW - len(tail2))]))
+            if len(rem):
+                parts.append(rem)
+
+        target = max(0, int(self._input_samples * self._ratio))
+        desired = max(target, int(self._frames_done * self._hop_out))
+        frame_budget = int((desired - self._emitted_total) / max(self._hop_out, 1.0)) + 8
+        for _ in range(max(0, frame_budget)):
+            rem = self._process_frame(np.zeros(PW, dtype=np.float64))
+            if len(rem):
+                parts.append(rem)
+            if self._emitted_total >= desired:
+                break
+        remaining = desired - self._emitted_total
+        if remaining > 0:
+            rem = self._emit(remaining)
             if len(rem):
                 parts.append(rem)
 
         stretched = np.concatenate(parts) if parts else np.zeros(0)
         out = self._rs_drain(stretched)
         out = self._flanger(out)
-        return (np.clip(out, -0.999, 0.999) * 32767.0).astype(np.int16).tobytes()
+        result = (np.clip(out, -0.999, 0.999) * 32767.0).astype(np.int16).tobytes()
+        self.reset()
+        return result
 
     def _rs_drain(self, stretched: np.ndarray) -> np.ndarray:
         """Emit the ENTIRE resampled stream (no holdback) and reset the reader."""
@@ -194,6 +225,35 @@ class UltronVoice:
         self._rs_pos = 0.0
         return np.asarray(out, dtype=np.float64) if out else np.zeros(0)
 
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+        frame = frame * self._win
+        X = np.fft.rfft(frame)
+        mag = np.abs(X)
+        phase = np.angle(X)
+        if self._prev_phase is not None:
+            delta = _princarg(phase - self._prev_phase - self._freq * PH)
+        else:
+            delta = np.zeros_like(phase)
+        self._prev_phase = phase
+        if self._out_phase is None:
+            self._out_phase = phase.copy()
+        self._out_phase = self._out_phase + self._freq * self._hop_out + delta
+        Y = mag * np.exp(1j * self._out_phase) * self._eq
+        voiced = np.fft.irfft(Y, n=PW) * self._win
+        i0 = int(self._frames_done * self._hop_out)
+        i1 = i0 + PW
+        if i1 > len(self._synth):
+            pad = i1 - len(self._synth)
+            self._synth = np.concatenate([self._synth, np.zeros(pad)])
+            self._norm = np.concatenate([self._norm, np.zeros(pad)])
+        self._synth[i0:i1] += voiced
+        self._norm[i0:i1] += self._win * self._win
+        self._frames_done += 1
+        target = int(self._frames_done * self._hop_out) - PW
+        if target > self._emitted_total:
+            return self._emit(target - self._emitted_total)
+        return np.zeros(0, dtype=np.float64)
+
     # ── phase vocoder TIME-STRETCH stage (pitch preserved, τ = p) ────────────
     def _run(self, x: np.ndarray) -> np.ndarray:
         """Stretch factor = self._ratio (well under warm < 1 → compress). Frames
@@ -203,37 +263,10 @@ class UltronVoice:
         parts = []
 
         while len(buf) - cursor >= PW:
-            frame = buf[cursor:cursor + PW] * self._win
-            X = np.fft.rfft(frame)
-            mag = np.abs(X)
-            phase = np.angle(X)
-            if self._prev_phase is not None:
-                delta = _princarg(phase - self._prev_phase - self._freq * PH)
-            else:
-                delta = np.zeros_like(phase)
-            self._prev_phase = phase
-            if self._out_phase is None:
-                self._out_phase = phase.copy()
-            self._out_phase = self._out_phase + self._freq * self._hop_out + delta
-            Y = mag * np.exp(1j * self._out_phase) * self._eq
-            voiced = np.fft.irfft(Y, n=PW) * self._win
-
-            i0 = int(self._frames_done * self._hop_out)    # stretch grid
-            i1 = i0 + PW
-            if i1 > len(self._synth):
-                pad = i1 - len(self._synth)
-                self._synth = np.concatenate([self._synth, np.zeros(pad)])
-                self._norm = np.concatenate([self._norm, np.zeros(pad)])
-            self._synth[i0:i1] += voiced
-            self._norm[i0:i1] += self._win * self._win
-            self._frames_done += 1
+            rem = self._process_frame(buf[cursor:cursor + PW])
+            if len(rem):
+                parts.append(rem)
             cursor += PH
-
-            target = int(self._frames_done * self._hop_out) - PW
-            if target > self._emitted_total:
-                seg = self._emit(target - self._emitted_total)
-                if len(seg):
-                    parts.append(seg)
 
         if cursor:
             self._in = buf[cursor:]

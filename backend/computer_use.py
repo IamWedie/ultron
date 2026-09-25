@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 
 ACTION_VOCABULARY = """You control a Windows desktop by outputting ACTION (json only).
@@ -35,17 +36,51 @@ Rules:
 """
 
 
+def validate_action(action: dict) -> dict:
+    if not isinstance(action, dict):
+        raise ValueError("action must be an object")
+    kind = action.get("type")
+    if kind not in {"click", "double_click", "right_click", "move", "scroll", "type", "press", "done"}:
+        raise ValueError("unsupported action type")
+    if kind in {"click", "double_click", "right_click", "move"}:
+        for name in ("x", "y"):
+            value = action.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+            if value < 0 or value > 10000:
+                raise ValueError(f"{name} is outside the allowed range")
+    elif kind == "scroll":
+        value = action.get("amount")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("scroll amount must be finite")
+        if value < -100 or value > 100:
+            raise ValueError("scroll amount is outside the allowed range")
+    elif kind == "type":
+        value = action.get("text")
+        if not isinstance(value, str) or len(value) > 4096:
+            raise ValueError("type text is too long")
+    elif kind == "press":
+        value = action.get("keys")
+        if not isinstance(value, str) or not value or len(value) > 128:
+            raise ValueError("press keys are invalid")
+    elif kind == "done":
+        value = action.get("summary", "")
+        if not isinstance(value, str) or len(value) > 500:
+            raise ValueError("done summary is too long")
+    return action
+
+
 def _parse_action(text: str) -> dict | None:
-    m = re.search(r"\{.*\}", text or "", re.S)
-    if not m:
+    match = re.search(r"\{", text or "")
+    if not match:
         return None
     try:
-        obj = json.loads(m.group(0))
+        value, end = json.JSONDecoder().raw_decode(text[match.start():])
     except json.JSONDecodeError:
         return None
-    if not isinstance(obj, dict):
+    if text[match.start() + end:].strip():
         return None
-    return obj
+    return value if isinstance(value, dict) else None
 
 
 def _build_prompt(task: str, history: list[tuple[str, str]], step: int, steps: int) -> str:
@@ -59,6 +94,9 @@ def _build_prompt(task: str, history: list[tuple[str, str]], step: int, steps: i
 
 async def run_computer_use(client, model: str, task: str, act_async, steps: int = 12, screenshot=None) -> str:
     """act_async(action: dict) -> awaitable[str] — executes the raw action."""
+    task = str(task or "").strip()
+    if not task or len(task) > 2000:
+        return "Computer task is empty or too long."
     steps = max(3, min(int(steps), 16))
     history: list[tuple[str, str]] = []
     shot_fn = screenshot or (lambda: _capture_screen_default())
@@ -87,6 +125,11 @@ async def run_computer_use(client, model: str, task: str, act_async, steps: int 
         action = _parse_action(text)
         if action is None:
             return f"Model output was not a usable action (step {step}). Last text: {text[:200]}"
+
+        try:
+            action = validate_action(action)
+        except ValueError as e:
+            return f"Invalid computer action: {e}"
 
         if action.get("type") == "done":
             return str(action.get("summary", "Task complete."))

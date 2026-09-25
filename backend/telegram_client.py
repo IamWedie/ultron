@@ -19,16 +19,15 @@ import ctypes
 import os
 import random
 import sys
+import tempfile
 import time
-import traceback
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
-import telethon
+import numpy as np
+
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl import functions as f, types as t
-
-import ntgcalls
 
 APP_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Ultron"
@@ -97,6 +96,14 @@ else:
     _unprotect = FakeDPAPI.decrypt
 
 
+def _has_audio_signal(data: bytes, threshold: int = 500) -> bool:
+    usable = data[:len(data) - (len(data) % 2)]
+    if not usable:
+        return False
+    samples = np.frombuffer(usable, dtype="<i2")
+    return bool(samples.size and np.abs(samples).max() >= threshold)
+
+
 def _redact(text: str) -> str:
     text = str(text)
     api_hash = os.environ.get("ULTRON_TELEGRAM_API_HASH", "")
@@ -124,8 +131,18 @@ def load_session() -> Optional[str]:
 def save_session(session_string: str) -> None:
     os.makedirs(APP_DIR, exist_ok=True)
     blob = _protect(session_string.encode("utf-8"))
-    with open(SESSION_FILE, "w", encoding="ascii") as f:
-        f.write(blob)
+    fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".tmp", dir=APP_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(blob)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, SESSION_FILE)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def clear_session() -> None:
@@ -158,8 +175,19 @@ class TelegramController:
         self._checking = asyncio.Lock()
         self._client: Optional[object] = None
         self._target_user_id: Optional[str] = None
+        self._target_access_hash: Optional[int] = None
         self._target_username = ""
         self._target_name = ""
+        self._audio_bridge = None
+
+    @property
+    def audio_bridge(self):
+        return self._audio_bridge
+
+    def feed_gemini_audio(self, pcm_24k: bytes) -> None:
+        bridge = self._audio_bridge
+        if bridge is not None:
+            bridge.feed_gemini_audio(pcm_24k)
 
     # -- events -------------------------------------------------------------
 
@@ -182,9 +210,6 @@ class TelegramController:
     # -- client construction ------------------------------------------------
 
     def _build(self) -> "object":
-        import telethon  # noqa: F401  (deliberately importable-only on demand)
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
         if self._session_string:
             client = TelegramClient(StringSession(self._session_string),
                                     self._api_id, self._api_hash)
@@ -197,21 +222,25 @@ class TelegramController:
     def phase(self) -> str:
         return self._phase
 
+    @property
+    def has_call(self) -> bool:
+        task = getattr(self, "_call_task", None)
+        return task is not None and not task.done()
+
     async def run(self) -> None:
         """Background entry: silently validate a stored session at startup."""
         api_id, api_hash = self._creds_from_env()
         if not api_id or not api_hash:
             self._status("off", "Telegram call account not configured.")
             return
-        try:
-            import telethon  # noqa: F401
-        except ImportError:
-            self._status("unavailable", "Telethon is not installed.")
-            return
         if not self._session_string:
             self._status("off", "Telegram call account not logged in.")
             return
-        self._api_id = int(api_id)
+        try:
+            self._api_id = int(api_id)
+        except (TypeError, ValueError):
+            self._status("off", "Telegram api_id is invalid.")
+            return
         self._api_hash = api_hash
         self._status("handshaking", "Validating Telegram session...")
         try:
@@ -278,7 +307,9 @@ class TelegramController:
                 self._status("awaiting_code", "Telegram phone number required.")
                 return
             self._session_string = client.session.save()
-            await self._request_code(client)
+            if not await self._request_code(client):
+                await client.disconnect()
+                self._client = None
         except Exception as e:
             try:
                 await client.disconnect()
@@ -287,19 +318,21 @@ class TelegramController:
             self._client = None
             self._status("off", f"Telegram connect failed: {type(e).__name__}")
 
-    async def _request_code(self, client: "object") -> None:
+    async def _request_code(self, client: "object") -> bool:
         try:
             self._pending_code_hash = None
             sent = await client.send_code_request(self._phone)
             self._pending_code_hash = getattr(sent, "phone_code_hash", None)
             if not isinstance(self._pending_code_hash, str):
                 self._status("off", "Telegram did not return a code hash.")
-                return
+                return False
             self._status("awaiting_code", f"Code requested for {self._phone}.")
             self._emit(type="telegram_code_required",
                        phone=self._phone, hint=f"Enter the login code for {self._phone}.")
+            return True
         except Exception as e:
             self._status("off", f"Could not send code: {type(e).__name__}")
+            return False
 
     async def submit_code(self, msg: dict) -> None:
         """Complete login with the SMS/Telegram code (or 2FA password)."""
@@ -339,7 +372,6 @@ class TelegramController:
             except Exception:
                 pass
             self._client = None
-            traceback.print_exc()
             self._emit(type="telegram_code_result", ok=False,
                        message=f"Login failed: {type(e).__name__}: "
                                f"{_redact(str(e))}")
@@ -372,7 +404,11 @@ class TelegramController:
                 self._status("connected", self._message)
                 return
             if self._session_string and api_id and api_hash:
-                self._api_id = int(api_id)
+                try:
+                    self._api_id = int(api_id)
+                except (TypeError, ValueError):
+                    self._status("off", "Telegram api_id is invalid.")
+                    return
                 self._api_hash = api_hash
                 self._status("handshaking", "Validating Telegram session...")
                 try:
@@ -411,6 +447,10 @@ class TelegramController:
         self._client = None
         self._session_string = None
         self._pending_code_hash = None
+        self._target_user_id = None
+        self._target_access_hash = None
+        self._target_username = ""
+        self._target_name = ""
         clear_session()
         self._status("off", "Telegram call account logged out.")
 
@@ -434,10 +474,16 @@ class TelegramController:
                        message="Telegram account not configured.")
             return
 
+        self._target_user_id = None
+        self._target_access_hash = None
+        self._target_username = ""
+        self._target_name = ""
         client = self._client
+        owned_client = False
         try:
             if client is None or not client.is_connected():
                 client = self._build()
+                owned_client = True
                 await client.connect()
             if not await client.is_user_authorized():
                 self._emit(type="telegram_target_result", ok=False,
@@ -456,7 +502,13 @@ class TelegramController:
                            message="Target is a bot; Telegram calls need a person.")
                 return
 
+            input_peer = await client.get_input_entity(entity)
+            if not isinstance(input_peer, t.InputPeerUser):
+                self._emit(type="telegram_target_result", ok=False,
+                           message="Target did not resolve to a callable user peer.")
+                return
             self._target_user_id = str(entity.id)
+            self._target_access_hash = input_peer.access_hash
             self._target_username = getattr(entity, "username", None) or ""
             self._target_name = getattr(entity, "first_name", "") or ""
             name_part = "" if entity.bot else f" ({self._target_name})".strip()
@@ -471,6 +523,12 @@ class TelegramController:
             self._emit(type="telegram_target_result", ok=False,
                        message=f"Could not resolve target: "
                                f"{type(e).__name__}: {_redact(str(e))}")
+        finally:
+            if owned_client and client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
     # -- call state machine (Phase C7) ----------------------------------------
 
@@ -478,7 +536,7 @@ class TelegramController:
         """Load api_id, api_hash, target from env or config.dat (case-insensitive)."""
         api_id = os.environ.get("ULTRON_TELEGRAM_API_ID", "").strip()
         api_hash = os.environ.get("ULTRON_TELEGRAM_API_HASH", "").strip()
-        target = os.environ.get("ULTRON_TELEGRAM_TARGET", "").strip() or "@HerA9el"
+        target = os.environ.get("ULTRON_TELEGRAM_TARGET", "").strip()
         if api_id and api_hash:
             return api_id, api_hash, target
         try:
@@ -520,26 +578,66 @@ class TelegramController:
     async def _call_emit_state(self, state: str, message: str = "") -> None:
         self._emit(type="telegram_call_state", state=state, message=message)
 
+    @staticmethod
+    def _parse_bool(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def _calls_enabled(self) -> bool:
+        env_value = os.environ.get("ULTRON_TELEGRAM_ENABLED")
+        if env_value is not None:
+            return self._parse_bool(env_value)
+        try:
+            if sys.platform == "win32":
+                import json
+                config_path = os.path.join(APP_DIR, "config.dat")
+                if os.path.exists(config_path):
+                    with open(config_path, "rb") as f:
+                        data = json.loads(dpapi_decrypt(f.read()).decode("utf-8"))
+                    return self._parse_bool(data.get("TelegramCallEnabled", False))
+        except Exception:
+            return False
+        return False
+
+    def _fallbacks_enabled(self) -> bool:
+        env_value = os.environ.get("ULTRON_CALL_FALLBACK_ENABLED")
+        if env_value is not None:
+            return self._parse_bool(env_value, True)
+        try:
+            if sys.platform == "win32":
+                import json
+                config_path = os.path.join(APP_DIR, "config.dat")
+                if os.path.exists(config_path):
+                    with open(config_path, "rb") as f:
+                        data = json.loads(dpapi_decrypt(f.read()).decode("utf-8"))
+                    return self._parse_bool(data.get("CallFallbackEnabled", True), True)
+        except Exception:
+            return False
+        return True
+
+    def _fallback_target(self) -> str | None:
+        env_value = os.environ.get("ULTRON_CALL_FALLBACK_CHAT_ID", "").strip()
+        if env_value:
+            return env_value
+        try:
+            if sys.platform == "win32":
+                import json
+                config_path = os.path.join(APP_DIR, "config.dat")
+                if os.path.exists(config_path):
+                    with open(config_path, "rb") as f:
+                        data = json.loads(dpapi_decrypt(f.read()).decode("utf-8"))
+                    value = str(data.get("CallFallbackChatId", "")).strip()
+                    return value or None
+        except Exception:
+            return None
+        return None
+
     async def call_start(self, msg: dict, mic_queue: asyncio.Queue = None, audio_out_queue: asyncio.Queue = None) -> None:
         """Start an outgoing Telegram voice call (C7/C8 state machine with fallback)."""
-        # Gate: TelegramCallEnabled must be True (from env or settings)
-        enabled = os.environ.get("ULTRON_TELEGRAM_ENABLED", "").strip().lower()
-        if enabled not in ("1", "true", "yes", "on"):
-            # Also check config.dat for the flag
-            try:
-                if sys.platform == "win32":
-                    import json
-                    config_path = os.path.join(APP_DIR, "config.dat")
-                    if os.path.exists(config_path):
-                        with open(config_path, "rb") as f:
-                            data = json.loads(dpapi_decrypt(f.read()).decode("utf-8"))
-                        val = data.get("TelegramCallEnabled", False)
-                        if not val:
-                            self._emit(type="telegram_call_result", ok=False,
-                                       message="Telegram calling is disabled (TelegramCallEnabled=false).")
-                            return
-            except Exception:
-                pass
+        if not self._calls_enabled():
             self._emit(type="telegram_call_result", ok=False,
                        message="Telegram calling is disabled (TelegramCallEnabled=false).")
             return
@@ -551,12 +649,12 @@ class TelegramController:
             return
 
         # Must have a resolved target
-        if not self._target_user_id:
+        if not self._target_user_id or self._target_access_hash is None:
             self._emit(type="telegram_call_result", ok=False,
                        message="No call target resolved. Use telegram_resolve_target first.")
             return
 
-        api_id, api_hash, target = self._creds_from_config()
+        api_id, api_hash, _ = self._creds_from_config()
         if not api_id or not api_hash:
             self._emit(type="telegram_call_result", ok=False,
                        message="Telegram api_id/api_hash not configured.")
@@ -578,18 +676,28 @@ class TelegramController:
         # Store audio queues for the call task
         self._gemini_mic_queue = mic_queue
         self._gemini_audio_out_queue = audio_out_queue
+        target_label = self._target_username or self._target_user_id
+        target_peer = t.InputPeerUser(
+            user_id=int(self._target_user_id),
+            access_hash=int(self._target_access_hash),
+        )
 
-        await self._call_emit_state("ringing", f"Calling {target}...")
+        await self._call_emit_state("ringing", f"Calling {target_label}...")
 
         # Run the call in a background task so we can return immediately
-        self._call_task = asyncio.create_task(self._run_call_task(api_id, api_hash, session, target))
+        self._call_task = asyncio.create_task(
+            self._run_call_task(api_id, api_hash, session, target_label, target_peer)
+        )
 
     async def call_stop(self) -> None:
         """Stop/hangup the current outgoing call."""
         if hasattr(self, "_call_task") and self._call_task and not self._call_task.done():
-            self._call_task.cancel()
+            task = self._call_task
+            task.cancel()
             try:
-                await self._call_task
+                await asyncio.wait_for(task, timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
             except asyncio.CancelledError:
                 pass
             await self._call_emit_state("ended", "Call stopped by user.")
@@ -602,10 +710,16 @@ class TelegramController:
         phase = getattr(self, "_call_phase", "idle")
         self._emit(type="telegram_call_state", state=phase, message="")
 
-    async def _run_call_task(self, api_id: str, api_hash: str, session: str, target: str) -> None:
+    async def _run_call_task(
+        self,
+        api_id: str,
+        api_hash: str,
+        session: str,
+        target: str,
+        target_peer: Optional[t.InputPeerUser] = None,
+    ) -> None:
         """Background task that runs the full call flow with fallback messaging."""
         import ntgcalls
-        import numpy as np  # noqa: F401
 
         # Import the audio bridge
         from call_audio_bridge import InCallAudioBridge
@@ -620,9 +734,14 @@ class TelegramController:
 
         self._call_phase = "ringing"
         self._call_task = asyncio.current_task()
-
-        # Audio bridge (will be initialized after we have the Gemini session queues)
         self._audio_bridge: Optional[InCallAudioBridge] = None
+        client = None
+        wrtc = None
+        user_id = None
+        call_id = None
+        call_access_hash = None
+        last_connection_id = 0
+        monitor_task = None
 
         try:
             client = TelegramClient(StringSession(session), int(api_id), api_hash)
@@ -630,6 +749,7 @@ class TelegramController:
 
             accepted = asyncio.Event()
             accepted_pc = None
+            requested_call_id = None
             discarded = asyncio.Event()
             call_id = None
             call_access_hash = None
@@ -638,6 +758,7 @@ class TelegramController:
 
             # Connection quality tracking
             connection_quality = {"last_frame": time.time(), "frame_count": 0}
+            connection_state = {"failed": False, "connected_at": time.time()}
 
             def on_frames(chat_id, mode, device, frames):
                     nonlocal rx_bytes
@@ -649,15 +770,20 @@ class TelegramController:
                             # Feed to audio bridge for resampling to Gemini
                             if self._audio_bridge:
                                 self._audio_bridge.feed_telegram_rx(data)
-                            # Track first real speech from remote
-                            if self._call_first_speech_ts is None:
+                            if self._call_first_speech_ts is None and _has_audio_signal(data):
                                 self._call_first_speech_ts = time.time()
                             # Update connection quality
                             connection_quality["last_frame"] = time.time()
                             connection_quality["frame_count"] += 1
 
             def on_conn_change(chat_id, state):
-                pass  # silent
+                state_value = getattr(state, "state", state)
+                state_name = (getattr(state_value, "name", None) or str(state_value)).lower()
+                if "fail" in state_name or "disconnect" in state_name or "closed" in state_name or "timeout" in state_name or "timed" in state_name:
+                    connection_state["failed"] = True
+                elif "connected" in state_name:
+                    connection_state["failed"] = False
+                    connection_state["connected_at"] = time.time()
 
             wrtc.on_frames(on_frames)
             wrtc.on_connection_change(on_conn_change)
@@ -667,9 +793,9 @@ class TelegramController:
                 if not isinstance(update, t.UpdatePhoneCall):
                     return
                 pc = update.phone_call
+                if requested_call_id is not None and getattr(pc, "id", None) != requested_call_id:
+                    return
                 if isinstance(pc, t.PhoneCallAccepted):
-                    call_id = pc.id
-                    call_access_hash = pc.access_hash
                     accepted_pc = pc
                     self._call_answered_ts = time.time()
                     accepted.set()
@@ -681,14 +807,12 @@ class TelegramController:
             await client.connect()
             if not await client.is_user_authorized():
                 await self._call_emit_state("error", "Session not authorized")
-                await client.disconnect()
                 return
 
             # 1. create_p2p_call
-            input_user = await client.get_input_entity(target)
+            input_user = target_peer or await client.get_input_entity(target)
             if not isinstance(input_user, t.InputPeerUser):
                 await self._call_emit_state("error", "Target is not a user")
-                await client.disconnect()
                 return
             user_id = input_user.user_id
             await wrtc.create_p2p_call(user_id)
@@ -719,10 +843,10 @@ class TelegramController:
             waiting = result.phone_call
             if not isinstance(waiting, t.PhoneCallWaiting):
                 await self._call_emit_state("error", f"Unexpected RequestCall result: {type(waiting).__name__}")
-                await client.disconnect()
                 return
             call_id = waiting.id
             call_access_hash = waiting.access_hash
+            requested_call_id = call_id
             await self._call_emit_state("ringing", f"Ringing {target}...")
 
             # 4. Wait for answer or timeout
@@ -736,16 +860,18 @@ class TelegramController:
             )
             for task in pending:
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
             if discarded_task in done:
                 await self._call_emit_state("ended", "Call declined by peer")
                 await self._evaluate_and_send_fallback(client, "declined")
-                await client.disconnect()
                 return
             if timeout_task in done:
                 await self._call_emit_state("ended", "Ring timeout")
                 await self._evaluate_and_send_fallback(client, "timeout")
-                await client.disconnect()
                 return
 
             # 5. PhoneCallAccepted - exchange keys + ConfirmCall
@@ -770,7 +896,6 @@ class TelegramController:
             phone_call = conn.phone_call
             if not isinstance(phone_call, t.PhoneCall):
                 await self._call_emit_state("error", f"ConfirmCall failed: {type(phone_call).__name__}")
-                await client.disconnect()
                 return
 
             call_id = phone_call.id
@@ -799,33 +924,58 @@ class TelegramController:
             versions = list(phone_call.protocol.library_versions)
             p2p_allowed = bool(phone_call.p2p_allowed or False)
 
-            # 6. Initialize audio bridge with EXTERNAL source (named pipe)
+            # 6. Initialize audio bridge with the supported external-frame source
+            async def send_frame(frame: bytes):
+                await wrtc.send_external_frame(
+                    user_id,
+                    ntgcalls.StreamDevice.MICROPHONE,
+                    frame,
+                    ntgcalls.FrameData(int(time.time() * 1000), 0, 0, 0),
+                )
+
             self._audio_bridge = InCallAudioBridge(
                 mic_queue=self._gemini_mic_queue,
                 audio_out_queue=self._gemini_audio_out_queue,
                 on_remote_speech=lambda speaking: asyncio.create_task(
                     self._call_emit_state("remote_speech", "started" if speaking else "ended")
-                )
+                ),
+                send_frame=send_frame,
             )
-            
-            # Configure ntgcalls to use EXTERNAL source (named pipe) for TX
+
             await wrtc.set_stream_sources(
                 user_id,
                 ntgcalls.StreamMode.CAPTURE,
                 ntgcalls.MediaDescription(
                     microphone=ntgcalls.AudioDescription(
                         media_source=ntgcalls.MediaSource.EXTERNAL,
-                        input=self._audio_bridge.get_pipe_name(),
+                        input="",
                         sample_rate=TELEGRAM_SR,
                         channel_count=1,
                     ),
                 ),
             )
-            
-            # Start audio bridge (creates named pipe, waits for ntgcalls to connect)
+
             await self._audio_bridge.start()
-            
+            self._audio_bridge.set_mic_bypass(True)
             await wrtc.connect_p2p(user_id, servers, versions, p2p_allowed)
+            await wrtc.set_stream_sources(
+                user_id,
+                ntgcalls.StreamMode.PLAYBACK,
+                ntgcalls.MediaDescription(
+                    speaker=ntgcalls.AudioDescription(
+                        media_source=ntgcalls.MediaSource.EXTERNAL,
+                        input="",
+                        sample_rate=TELEGRAM_SR,
+                        channel_count=1,
+                    ),
+                ),
+            )
+            if hasattr(wrtc, "unmute"):
+                await wrtc.unmute(user_id)
+            if hasattr(wrtc, "resume"):
+                await wrtc.resume(user_id)
+            connection_state["failed"] = False
+            connection_state["connected_at"] = time.time()
             await self._call_emit_state("connected", f"Call live with {target}")
 
             # 7. Wait for hangup (no auto-timeout - conversation-driven duration)
@@ -834,25 +984,24 @@ class TelegramController:
             
             # C10: Connection health monitor task
             connection_lost = asyncio.Event()
-            connection_quality = {"last_frame": time.time(), "frame_count": 0}
-            
+
             async def connection_monitor():
-                """Monitor connection health, trigger reconnect if needed."""
                 while not connection_lost.is_set():
                     await asyncio.sleep(2.0)
-                    if connection_lost.is_set():
+                    if connection_state["failed"]:
+                        await self._call_emit_state("reconnecting", "Connection lost, attempting reconnect...")
+                        connection_lost.set()
                         break
-                    # Check if we haven't received frames for > 10 seconds
-                    if time.time() - connection_quality["last_frame"] > 10.0:
-                        if connection_quality["frame_count"] > 0:
-                            await self._call_emit_state("reconnecting", "Connection lost, attempting reconnect...")
-                            connection_lost.set()
-                            break
+                    last_activity = max(
+                        connection_quality["last_frame"],
+                        connection_state["connected_at"],
+                    )
+                    if time.time() - last_activity > 10.0:
+                        await self._call_emit_state("reconnecting", "Connection media stalled, ending call")
+                        connection_lost.set()
+                        break
             
             monitor_task = asyncio.create_task(connection_monitor())
-            
-            # Update connection quality on each frame received
-            original_on_frames = None
             
             # 7. Wait for hangup (no auto-timeout - conversation-driven duration)
             self._call_phase = "connected"
@@ -873,16 +1022,9 @@ class TelegramController:
             # Check if connection was lost (network issue)
             if connection_lost.is_set():
                 await self._call_emit_state("reconnecting", "Network disconnected, call ended")
-                # Send fallback if appropriate
                 await self._evaluate_and_send_fallback(client, "network_disconnect")
-                # Clean up
-                await self._cleanup_call_resources(client, wrtc, user_id, call_id, call_access_hash, last_connection_id)
                 return
-            
-            # Normal hangup - Clean up using shared method
-            await self._cleanup_call_resources(client, wrtc, user_id, call_id, call_access_hash, last_connection_id)
-            
-            # 9. On discard - evaluate fallback
+
             await self._evaluate_and_send_fallback(client, "hangup")
 
         except asyncio.CancelledError:
@@ -890,43 +1032,62 @@ class TelegramController:
             # Don't send fallback on explicit cancel
         except Exception as e:
             await self._call_emit_state("error", f"Call failed: {type(e).__name__}: {_redact(str(e))}")
-            # Clean up on error
+        finally:
+            if monitor_task is not None and not monitor_task.done():
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
             await self._cleanup_call_resources(
                 client, wrtc, user_id, call_id, call_access_hash, last_connection_id
             )
-        finally:
+            self._call_answered_ts = None
+            self._call_first_speech_ts = None
+            self._call_first_real_speech_ts = None
+            self._gemini_mic_queue = None
+            self._gemini_audio_out_queue = None
+            self._call_payload = {}
             self._call_phase = "idle"
             if hasattr(self, "_call_task"):
                 self._call_task = None
 
     async def _cleanup_call_resources(
         self,
-        client,
-        wrtc,
-        user_id: int,
-        call_id: Optional[int],
-        call_access_hash: Optional[int],
-        connection_id: int,
+        client=None,
+        wrtc=None,
+        user_id: Optional[int] = None,
+        call_id: Optional[int] = None,
+        call_access_hash: Optional[int] = None,
+        connection_id: int = 0,
     ) -> None:
-        """Clean up all call resources safely."""
-        try:
-            if self._audio_bridge:
-                await self._audio_bridge.stop()
-        except Exception:
-            pass
-        try:
-            await wrtc.stop(user_id)
-        except Exception:
-            pass
-        if call_id and call_access_hash:
+        bridge = self._audio_bridge
+        self._audio_bridge = None
+        if bridge is not None:
             try:
-                await client(f.phone.DiscardCallRequest(
+                await asyncio.wait_for(bridge.stop(), timeout=2.0)
+            except Exception:
+                pass
+        if wrtc is not None and user_id is not None:
+            try:
+                await asyncio.wait_for(wrtc.stop(user_id), timeout=2.0)
+            except Exception:
+                pass
+        if client is not None and call_id and call_access_hash:
+            try:
+                request = f.phone.DiscardCallRequest(
                     peer=t.InputPhoneCall(id=call_id, access_hash=call_access_hash),
-                    duration=int(time.time() - self._call_start_ts),
+                    duration=max(0, int(time.time() - getattr(self, "_call_start_ts", time.time()))),
                     reason=t.PhoneCallDiscardReasonHangup(),
                     connection_id=connection_id,
                     video=False,
-                ))
+                )
+                await asyncio.wait_for(client(request), timeout=2.0)
+            except Exception:
+                pass
+        if client is not None:
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=2.0)
             except Exception:
                 pass
 
@@ -936,21 +1097,8 @@ class TelegramController:
         if not payload:
             return  # No payload = manual call, no fallback
 
-        # Check if fallback is enabled (from env or config)
-        fallback_enabled = os.environ.get("ULTRON_CALL_FALLBACK_ENABLED", "").strip().lower()
-        if fallback_enabled not in ("1", "true", "yes", "on"):
-            try:
-                if sys.platform == "win32":
-                    import json
-                    config_path = os.path.join(APP_DIR, "config.dat")
-                    if os.path.exists(config_path):
-                        with open(config_path, "rb") as f:
-                            data = json.loads(dpapi_decrypt(f.read()).decode("utf-8"))
-                        val = data.get("CallFallbackEnabled", True)
-                        if not val:
-                            return
-            except Exception:
-                pass
+        if not self._fallbacks_enabled():
+            return
 
         # Get fallback threshold (default 5 seconds)
         fallback_threshold = 5
@@ -970,8 +1118,8 @@ class TelegramController:
         except Exception:
             pass
 
-        duration = time.time() - self._call_start_ts
         answered = self._call_answered_ts is not None
+        duration = time.time() - (self._call_answered_ts or self._call_start_ts)
         spoke = self._call_first_speech_ts is not None
 
         # Conditions for fallback:
@@ -1008,9 +1156,10 @@ class TelegramController:
             
             text = f"{priority_emoji} **Call Fallback** ({reason})\n\n**{title}**\n{body}"
 
-            # Send to the same target that was called
-            target = self._target_username or self._target_user_id
-            await client.send_message(target, text, parse_mode="md")
+            target = self._fallback_target() or self._target_username or self._target_user_id
+            if not target:
+                raise RuntimeError("No Telegram fallback target configured.")
+            await client.send_message(target, text)
             
             self._emit(type="telegram_call_fallback_sent", ok=True, 
                        target=target, source=source, reason=reason)

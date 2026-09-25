@@ -12,10 +12,11 @@ persistence + due-bookkeeping only.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from datetime import datetime
+
+import json_store
 
 
 def store_path() -> str:
@@ -23,21 +24,24 @@ def store_path() -> str:
     return os.path.join(base, "Ultron", "monitors.json")
 
 
+_load_error = None
+
+
 def _load() -> dict:
+    global _load_error
     try:
-        with open(store_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
+        data = json_store.load(store_path(), {})
+        _load_error = None
+        return data
+    except json_store.CorruptStoreError as exc:
+        _load_error = str(exc)
+        return {}
 
 
 def _save(data: dict):
-    os.makedirs(os.path.dirname(store_path()), exist_ok=True)
-    with open(store_path(), "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if _load_error:
+        raise RuntimeError(_load_error)
+    json_store.save(store_path(), data)
 
 
 def list_topics() -> list:
