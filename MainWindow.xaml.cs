@@ -2,6 +2,9 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Windowing;
 using Ultron.Services;
+using Ultron.Services.Apps;
+using Ultron.Services.Processes;
+using Ultron.Services.Tools.Apps;
 using Windows.System;
 using Windows.UI;
 using Microsoft.UI;
@@ -22,7 +25,7 @@ namespace Ultron;
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable",
     Justification = "MainWindow is the composition root; it disposes owned services once in its Closed handler.")]
-public sealed partial class MainWindow : Window
+public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWindowActivator
 {
     internal static void Dbg(string msg)
     {
@@ -78,6 +81,10 @@ public sealed partial class MainWindow : Window
     internal TimeSpan _callDuration;
     private const int HotkeyPtt = 1, HotkeyMute = 2, HotkeyWake = 3;
 
+    // Centralized tool registry with authorization metadata
+    private readonly ToolRouter _toolRouter;
+    private readonly UndoLedger _undo = new();
+
     public MainWindow()
     {
         InitializeComponent();
@@ -95,6 +102,8 @@ public sealed partial class MainWindow : Window
             _settings.TelegramApiId, _settings.TelegramApiHash,
             _settings.TelegramPhone, _settings.TelegramCallEnabled,
             _settings.TelegramCallTarget);
+        _toolRouter = BuildToolRouter();
+
         _gemini.StatusChanged += OnGeminiStatusChanged;
         _gemini.TranscriptReceived += OnGeminiTranscript;
         _gemini.ToolCallReceived += OnGeminiToolCall;
@@ -165,11 +174,22 @@ public sealed partial class MainWindow : Window
                     : $"Telegram call failed: {message}");
             });
         };
-        _gemini.TelegramCallFallbackSent += (source, target, reason) =>
+        _gemini.TelegramCallFallbackSent += (source, target, reason, ok, message) =>
         {
             _ = DispatcherQueue?.TryEnqueue(() =>
             {
-                AddMessage("system", $"📩 Call fallback sent to {target} ({source}: {reason})");
+                if (ok)
+                {
+                    AddMessage("system", $"📩 Call fallback sent to {target} ({source}: {reason})");
+                }
+                else
+                {
+                    // The owner was not reached. Saying "sent" here would hide the
+                    // one case the whole feature exists to prevent.
+                    AddMessage("error",
+                        $"⚠️ Call fallback FAILED - the owner was not reached "
+                        + $"({source}: {reason}). {message}");
+                }
             });
         };
 
@@ -241,7 +261,7 @@ public sealed partial class MainWindow : Window
         tb.ButtonPressedForegroundColor = Colors2(0xFF, 0xFF, 0xFF);
         SetTitleBar(TitleBarRoot);
         try { _appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "ULTRON.exe")); }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"SetIcon failed: {ex.Message}", AppLog.Level.Warn); }
         _appWindow.Title = Title;
 
         // Belt-and-suspenders: darken the native non-client caption so no white
@@ -251,8 +271,9 @@ public sealed partial class MainWindow : Window
             _selfHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             NativeTheme.ApplyDarkCaption(_selfHwnd);
         }
-        catch
+        catch (Exception ex)
         {
+            AppLog.Write("MainWindow", $"Dark caption failed: {ex.Message}", AppLog.Level.Warn);
             try { _selfHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this); } catch { }
         }
 
@@ -302,7 +323,7 @@ public sealed partial class MainWindow : Window
             winTimer.Tick += (_, _) => TrackActiveWindow();
             winTimer.Start();
         }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"TrackActiveWindow timer failed: {ex.Message}", AppLog.Level.Warn); }
 
         _brain.ApprovalRequested += OnApprovalRequested;
         WireInputs();
@@ -326,11 +347,76 @@ public sealed partial class MainWindow : Window
         }
 
         _repo = new ModelRepo(AppSettings.DataDir());
-        _repo.Progress += (key, size, pct) =>
-        {
-            DispatcherQueue.TryEnqueue(() => TickerText.Text = $"DOWNLOAD: {key} {size} ({pct:P0})");
-        };
+        _repo.Progress += OnModelProgress;
+
         LoadModelsAsync();
+    }
+
+    private void OnModelProgress(string key, string size, double pct)
+    {
+        DispatcherQueue.TryEnqueue(() => TickerText.Text = $"DOWNLOAD: {key} {size} ({pct:P0})");
+    }
+
+    /// <summary>
+    /// Composition root for the tool layer: the one place that is allowed to know
+    /// both the UI and the tool handlers.
+    /// </summary>
+    /// <remarks>
+    /// The lambdas below are scaffolding. As each domain moves out (STEP 3+), its
+    /// entry is replaced by a real service - e.g. FileToolService - that receives
+    /// only the dependencies it needs and never sees this window.
+    /// </remarks>
+    private ToolRouter BuildToolRouter()
+    {
+        // Legacy handlers still take Dictionary<string, object>. ToLegacyArgs is
+        // deleted in STEP 11, once every handler owns its typed arguments.
+        IToolHandler Sync(string name, Func<Dictionary<string, object>, string> run) =>
+            new DelegateToolHandler(name, (toolCall, _) => ToolResult.Ok(run(ToLegacyArgs(toolCall.Arguments))));
+
+        IToolHandler Async(string name, Func<Dictionary<string, object>, Task<string>> run) =>
+            new DelegateToolHandler(name, async (toolCall, _) =>
+                ToolResult.Ok(await run(ToLegacyArgs(toolCall.Arguments))));
+
+        IToolHandler Passthrough(string name, string message) =>
+            new DelegateToolHandler(name, (_, _) => ToolResult.Ok(message));
+
+        return new ToolRouter(
+            new IToolHandler[]
+            {
+                // memory
+                Sync("save_memory", HandleSaveMemory),
+                Sync("recall_memory", HandleRecallMemory),
+                // desktop input
+                Async("type_text", HandleTypeTextAsync),
+                Sync("press_key", HandlePressKey),
+                Sync("desktop_control", HandleDesktopControl),
+                Sync("window_manage", HandleWindowManage),
+                // system
+                Sync("system_status", _ => HandleSystemStatus()),
+                // apps
+                new AppToolService(new AppResolver(), new SystemProcessLauncher(), this, _undo),
+                Sync("computer_settings", HandleComputerSettings),
+                Sync("set_away_mode", HandleSetAway),
+                Sync("shutdown_jarvis", _ => Shutdown()),
+                // web / media
+                Async("web_search", HandleWebSearchAsync),
+                Async("weather_report", HandleWeatherAsync),
+                Async("browser_control", HandleBrowserControlAsync),
+                Sync("youtube_video", HandleYouTubeVideo),
+                // files
+                new FileToolService(new UserProfilePathPolicy(), _undo),
+                // communication / misc
+                Sync("send_message", HandleSendMessage),
+                Sync("reminder", HandleReminder),
+                Sync("code_helper", HandleCodeHelper),
+                Sync("undo", _ => HandleUndo()),
+                // handled by the backend process, never executed here
+                Passthrough("screen_process", "Vision handled by the backend."),
+                Passthrough("close_camera", "Camera closed."),
+                Passthrough("set_voice", "Voice handled by the backend."),
+            },
+            new PolicyEngine(),
+            this);
     }
 
     private async void LoadModelsAsync()
@@ -450,7 +536,7 @@ public sealed partial class MainWindow : Window
                 p?.WaitForExit(2000);
                 if (p?.ExitCode == 0) return shim;
             }
-            catch { }
+            catch (Exception ex) { AppLog.Write("MainWindow", $"FindEnvPython shim failed: {ex.Message}", AppLog.Level.Debug); }
         }
         return null;
     }
@@ -1105,7 +1191,7 @@ public sealed partial class MainWindow : Window
                 ? string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase)
                 : string.Compare(a.Category, b.Category, StringComparison.OrdinalIgnoreCase));
         }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"LoadMemory failed: {ex.Message}", AppLog.Level.Error); }
         return list;
     }
 
@@ -1219,7 +1305,7 @@ public sealed partial class MainWindow : Window
             Directory.CreateDirectory(Path.GetDirectoryName(MemoryFilePath)!);
             File.WriteAllText(MemoryFilePath, JsonSerializer.Serialize(root, MemoryJsonOpts));
         }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"SaveMemoryJson failed: {ex.Message}", AppLog.Level.Error); }
     }
 
     private async Task EditMemoryAsync(MemEntry m)
@@ -1322,6 +1408,17 @@ public sealed partial class MainWindow : Window
             ConversationList.Items.RemoveAt(0);
         }
         ConversationList.ScrollIntoView(item);
+
+        // Log to persistent memory store if enabled
+        if (_settings.MemoryLogging && (who == "user" || who == "ultron"))
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await _memory.LogAsync(who, text); }
+                catch { /* swallow - memory logging is best-effort */ }
+            });
+        }
+
         return item;
     }
 
@@ -1421,7 +1518,7 @@ public sealed partial class MainWindow : Window
     {
         _micMuted = !_micMuted;
         _settings.MicMuted = _micMuted;
-        try { _settings.Save(); } catch { }
+        try { _settings.Save(); } catch (Exception ex) { AppLog.Write("MainWindow", $"Settings save failed: {ex.Message}", AppLog.Level.Error); }
         _ = _gemini.SetMicMutedAsync(_micMuted);
         _dashboard?.PushMute(_micMuted);
         DispatcherQueue.TryEnqueue(() =>
@@ -2264,7 +2361,7 @@ public sealed partial class MainWindow : Window
             _verifyWatch.Stop();
             lock (_verifyLock) _verifyBuffer = null;
         }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"StopLocalMic failed: {ex.Message}", AppLog.Level.Warn); }
     }
 
     private void ResumeLocalMic()
@@ -2274,7 +2371,7 @@ public sealed partial class MainWindow : Window
             if (_voiceId.WakeEnrolled)
                 StartMonitor();
         }
-        catch { }
+        catch (Exception ex) { AppLog.Write("MainWindow", $"ResumeLocalMic failed: {ex.Message}", AppLog.Level.Warn); }
     }
 
     private void OnGeminiTranscript(string role, string text)
@@ -2295,20 +2392,21 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private void OnGeminiToolCall(GeminiToolCall call)
+    private void OnGeminiToolCall(ToolCall call)
     {
         DispatcherQueue.TryEnqueue(async () =>
         {
             Dbg($"Gemini tool call: {call.Name}");
+            // The router owns policy, approval and failure translation, so this
+            // method only has to hand the call over and report the outcome.
+            var result = await _toolRouter.ExecuteAsync(call);
             try
             {
-                var result = await ExecuteGeminiToolAsync(call);
                 await _gemini.SendToolResultAsync(call.Id, call.Name, result);
             }
             catch (Exception ex)
             {
-                Dbg($"Gemini tool error: {ex.Message}");
-                await _gemini.SendToolResultAsync(call.Id, call.Name, $"Tool failed: {ex.Message}");
+                Dbg($"Could not deliver result for {call.Name}: {ex.Message}");
             }
         });
     }
@@ -2523,91 +2621,80 @@ public sealed partial class MainWindow : Window
         _ = _gemini.SendTelegramCallStopAsync();
     }
 
-    private async Task<string> ExecuteGeminiToolAsync(GeminiToolCall call)
+
+    /// <summary>
+    /// Flattens typed arguments for handlers that have not been migrated yet.
+    /// Mirrors the old JsonElement.ToString() behaviour so no handler changes
+    /// meaning while it is being moved into a tool service.
+    /// </summary>
+    private static Dictionary<string, object> ToLegacyArgs(JsonElement arguments)
     {
-        // Tools that require user approval before execution
-        var approvalRequiredTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "type_text", "press_key", "computer_use", "file_processor",
-            "shutdown_jarvis", "desktop_control", "window_manage",
-            "computer_settings", "send_message", "open_app",
-            "browser_control", "undo"
-        };
-
-        if (approvalRequiredTools.Contains(call.Name))
-        {
-            var approved = await RequestToolApproval(call);
-            if (!approved)
-            {
-                return $"User denied approval for {call.Name}.";
-            }
-        }
-
-        switch (call.Name)
-        {
-            case "save_memory": return HandleSaveMemory(call.Args);
-            case "recall_memory": return HandleRecallMemory(call.Args);
-            case "type_text": return await HandleTypeTextAsync(call.Args);
-            case "press_key": return HandlePressKey(call.Args);
-            case "system_status": return HandleSystemStatus();
-            case "open_app": return HandleOpenApp(call.Args);
-            case "computer_settings": return HandleComputerSettings(call.Args);
-            case "web_search": return await HandleWebSearchAsync(call.Args);
-            case "weather_report": return await HandleWeatherAsync(call.Args);
-            case "reminder": return HandleReminder(call.Args);
-            case "browser_control": return await HandleBrowserControlAsync(call.Args);
-            case "file_processor": return await HandleFileProcessorAsync(call.Args);
-            case "desktop_control": return HandleDesktopControl(call.Args);
-            case "window_manage": return HandleWindowManage(call.Args);
-            case "code_helper": return HandleCodeHelper(call.Args);
-            case "send_message": return HandleSendMessage(call.Args);
-            case "set_away_mode": return HandleSetAway(call.Args);
-            case "youtube_video": return HandleYouTubeVideo(call.Args);
-            case "screen_process": return "Vision handled by the backend.";
-            case "close_camera": return "Camera closed.";
-            case "set_voice": return "Voice handled by the backend.";
-            case "shutdown_jarvis":
-                ScheduleShutdown(4);
-                return "Understood. Shutting down now.";
-case "undo":
-                return HandleUndo();
-            default: return $"Tool '{call.Name}' is not available yet.";
-        }
+        var legacy = new Dictionary<string, object>();
+        foreach (var prop in arguments.EnumerateObject())
+            legacy[prop.Name] = prop.Value.ToString();
+        return legacy;
     }
 
-    private async Task<bool> RequestToolApproval(GeminiToolCall call)
+    private string Shutdown()
     {
-        await _approvalGate.WaitAsync();
+        ScheduleShutdown(4);
+        return "Understood. Shutting down now.";
+    }
+
+    /// <summary>
+    /// Finds a freshly launched app's window, focuses it and makes it the typing
+    /// target, so "open X, then type Y" behaves as a user expects.
+    ///
+    /// Win32 window handles stay in the UI layer, but the wait is awaited rather
+    /// than slept: tool calls are dispatched onto the UI thread, so blocking here
+    /// froze the whole window for up to four seconds while the app started.
+    /// </summary>
+    async Task<IntPtr> ILaunchedWindowActivator.ActivateAsync(
+        string imageName, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            var hwnd = Native.FindMainWindow(imageName);
+            if (hwnd != IntPtr.Zero)
+            {
+                _lastTargetWindow = hwnd;
+                Native.FocusWindow(hwnd);
+                return hwnd;
+            }
+            await Task.Delay(200, cancellationToken).ConfigureAwait(true);
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Shows the approval dialog. This is the only place the tool layer touches
+    /// the UI, and it is reached through <see cref="IApprovalService"/> - no tool
+    /// service ever holds a reference to this window.
+    /// </summary>
+    async Task<bool> IApprovalService.RequestApprovalAsync(
+        ToolCall toolCall, PolicyDecision decision, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested) return false;
+
+        // One dialog at a time: overlapping prompts would race the user's answer.
+        await _approvalGate.WaitAsync(cancellationToken);
         try
         {
-            var description = call.Name switch
-            {
-                "type_text" => $"Type text into focused window: \"{call.Args?.GetValueOrDefault("text")}\"",
-                "press_key" => $"Press key/shortcut: \"{call.Args?.GetValueOrDefault("keys")}\"",
-                "computer_use" => $"Run autonomous desktop task: \"{call.Args?.GetValueOrDefault("task")}\"",
-                "file_processor" => $"File operation: {call.Args?.GetValueOrDefault("action")} on {call.Args?.GetValueOrDefault("file_path")}",
-                "open_app" => $"Launch application: \"{call.Args?.GetValueOrDefault("app_name")}\"",
-                "browser_control" => $"Open browser URL: \"{call.Args?.GetValueOrDefault("url")}\"",
-                "undo" => "Undo the most recent assistant action.",
-                "shutdown_jarvis" => "Shut down ULTRON completely.",
-                "desktop_control" => $"Mouse/keyboard action: {call.Args?.GetValueOrDefault("action")}",
-                "window_manage" => $"Window action: {call.Args?.GetValueOrDefault("action")}",
-                "computer_settings" => $"System setting change: {call.Args?.GetValueOrDefault("action")}",
-                "send_message" => $"Send message to {call.Args?.GetValueOrDefault("receiver")} via {call.Args?.GetValueOrDefault("platform")}",
-                _ => $"Execute {call.Name}?"
-            };
-
             var dialog = new ContentDialog
             {
                 XamlRoot = Content?.XamlRoot,
-                Title = "TOOL APPROVAL REQUIRED",
+                Title = decision.Risk >= RiskLevel.High
+                    ? "HIGH-RISK ACTION NEEDS APPROVAL"
+                    : "TOOL APPROVAL REQUIRED",
                 Content = new StackPanel
                 {
                     Spacing = 8,
                     Children =
                     {
-                        new TextBlock { Text = $"ULTRON wants to execute: {call.Name}", TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
-                        new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
+                        new TextBlock { Text = $"ULTRON wants to execute: {toolCall.Name}", TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
+                        new TextBlock { Text = decision.Summary, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) },
+                        new TextBlock { Text = $"Risk: {decision.Risk}", TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 120, 128, 140)) },
                     }
                 },
                 PrimaryButtonText = "Approve",
@@ -2627,50 +2714,17 @@ case "undo":
 
     /* ===================== UNDO LEDGER ===================== */
 
-    // List treated as a stack (last = newest). Kept as a list so overflow trims
-    // the OLDEST entry — the recent past is what people actually undo.
-    private readonly object _undoLock = new();
-    private readonly List<(string desc, Func<string> undo)> _undoStack = new();
-    private const int MaxUndoDepth = 20;
+    // The ledger itself lives in Services/UndoLedger so the file and app services
+    // can register reversals without knowing about this window.
+    private void PushUndo(string desc, Func<string> undo) => _undo.Push(desc, undo);
 
-    private void PushUndo(string desc, Func<string> undo)
-    {
-        lock (_undoLock)
-        {
-            _undoStack.Add((desc, undo));
-            while (_undoStack.Count > MaxUndoDepth) _undoStack.RemoveAt(0);
-        }
-    }
-
-    private string UndoHistory()
-    {
-        lock (_undoLock)
-        {
-            var outEntries = new List<string>(_undoStack.Count);
-            for (int i = _undoStack.Count - 1; i >= 0; i--) outEntries.Add(_undoStack[i].desc);
-            return string.Join(", ", outEntries);
-        }
-    }
+    private string UndoHistory() => _undo.History();
 
     private string HandleUndo()
     {
-        (string desc, Func<string> undo) item;
-        lock (_undoLock)
-        {
-            if (_undoStack.Count == 0) return "Nothing to undo.";
-            item = _undoStack[^1];
-            _undoStack.RemoveAt(_undoStack.Count - 1);
-        }
-        try
-        {
-            var result = item.undo();
-            Dbg($"Undo: {item.desc} -> {result}");
-            return $"Undid {item.desc}. {result}";
-        }
-        catch (Exception ex)
-        {
-            return $"Undo of {item.desc} failed: {ex.Message}";
-        }
+        var result = _undo.Undo();
+        Dbg($"Undo: {result}");
+        return result;
     }
 
     private string HandleSaveMemory(Dictionary<string, object> args)
@@ -2680,32 +2734,21 @@ case "undo":
         var value = args.GetValueOrDefault("value")?.ToString() ?? "";
         if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
             return "Missing key or value.";
-        var root = LoadMemoryJson();
-        if (!root.TryGetValue(category, out var entries) || entries is null)
+        
+        // Store in SQLite MemoryStore as a fact with topic = category
+        var factText = $"[{category}] {key}: {value}";
+        _ = Task.Run(async () =>
         {
-            entries = new Dictionary<string, object?>();
-            root[category] = entries;
-        }
-        var cur = new Dictionary<string, object?>
-        {
-            ["value"] = value,
-            ["updated"] = DateTime.Now.ToString("yyyy-MM-dd"),
-        };
-        if (entries.TryGetValue(key, out var o) && o is Dictionary<string, object?> old && old.TryGetValue("updated", out var u))
-            cur["updated"] = u;
-        entries[key] = cur;
-        SaveMemoryJson(root);
+            try { await _memory.AddFactAsync(factText, category); }
+            catch (Exception ex) { AppLog.Write("MainWindow", $"AddFactAsync failed: {ex.Message}", AppLog.Level.Error); }
+        });
+        
         PushUndo($"save_memory([{category}] {key})", () =>
         {
-            var r = LoadMemoryJson();
-            if (r.TryGetValue(category, out var e) && e is not null && e.Remove(key))
-            {
-                if (e.Count == 0) r.Remove(category);
-                SaveMemoryJson(r);
-                return "Removed the saved memory.";
-            }
-            return "Memory entry already gone.";
+            // Note: MemoryStore doesn't support fact removal by key, so we can't fully undo
+            return "Fact stored in memory (manual removal needed if desired).";
         });
+        
         if (_memCache.Count > 0) RefreshMemory();
         return $"Remembered [{category}] {key}: {value}";
     }
@@ -2713,7 +2756,42 @@ case "undo":
     private string HandleRecallMemory(Dictionary<string, object> args)
     {
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
-        return RecallFromMemoryJson(query);
+        
+        // Search both facts and conversations in SQLite MemoryStore
+        var results = new List<string>();
+        
+        // Search facts
+        var factsTask = Task.Run(async () =>
+        {
+            try { return await _memory.ListFactsAsync(); }
+            catch { return new List<string>(); }
+        });
+        
+        // Search conversations
+        var convsTask = Task.Run(async () =>
+        {
+            try { return await _memory.SearchConversationsAsync(query, 6); }
+            catch { return new List<ConversationRow>(); }
+        });
+        
+        Task.WaitAll(factsTask, convsTask);
+        
+        var facts = factsTask.Result;
+        var convs = convsTask.Result;
+        
+        var q = query.ToLowerInvariant();
+        foreach (var f in facts)
+        {
+            if (q.Length == 0 || f.ToLowerInvariant().Contains(q))
+                results.Add($"[fact] {f}");
+        }
+        foreach (var c in convs)
+        {
+            if (q.Length == 0 || c.Text.ToLowerInvariant().Contains(q))
+                results.Add($"[conv] {c.Ts} {c.Role}: {c.Text}");
+        }
+        
+        return results.Count > 0 ? string.Join("\n", results.Take(8)) : "Nothing found in memory.";
     }
 
     private async Task<string> HandleTypeTextAsync(Dictionary<string, object> args)
@@ -2944,167 +3022,6 @@ case "undo":
         return $"Memory: {mem} MB, Threads across system: {totalThreads}, Uptime: {DateTime.Now - proc.StartTime:hh\\:mm\\:ss}";
     }
 
-    private string HandleOpenApp(Dictionary<string, object> args)
-    {
-        var appName = args.GetValueOrDefault("app_name")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(appName)) return "No app name supplied.";
-        if (Path.IsPathRooted(appName) || appName.Contains(Path.DirectorySeparatorChar) || appName.Contains(Path.AltDirectorySeparatorChar))
-            return "Only registered application names are allowed.";
-        try
-        {
-            var exe = ResolveAppPath(appName);
-            if (string.IsNullOrEmpty(exe)) return $"Application '{appName}' was not found in the registered app catalog.";
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = exe,
-                UseShellExecute = true,
-            };
-            System.Diagnostics.Process.Start(psi);
-
-            // Capture what to close on undo: process name(s) derived from the
-            // resolved exe (shell handoff makes PID unreliable). Killing by
-            // name with a StartTime guard avoids closing a pre-existing copy.
-            var launchedAt = DateTime.UtcNow.AddSeconds(-2);
-            string? imageName = null;
-            if (exe != null)
-            {
-                imageName = Path.GetFileNameWithoutExtension(exe);
-            }
-            else
-            {
-                var stem = Path.GetFileNameWithoutExtension(appName);
-                if (!string.IsNullOrEmpty(stem)) imageName = stem;
-            }
-
-            if (!string.IsNullOrEmpty(imageName))
-            {
-                var img = imageName;
-                // Bring the freshly launched app's window to the front and make it
-                // the typing target, so "open X then type Y" works naturally.
-                IntPtr hwnd = IntPtr.Zero;
-                for (int k = 0; k < 20 && hwnd == IntPtr.Zero; k++)
-                {
-                    hwnd = Native.FindMainWindow(img);
-                    if (hwnd != IntPtr.Zero) break;
-                    System.Threading.Thread.Sleep(200);
-                }
-                if (hwnd != IntPtr.Zero)
-                {
-                    _lastTargetWindow = hwnd;
-                    Native.FocusWindow(hwnd);
-                }
-                PushUndo($"open_app({appName})", () =>
-                {
-                    var closed = 0;
-                    foreach (var proc in System.Diagnostics.Process.GetProcessesByName(img))
-                    {
-                        try
-                        {
-                            // Only close instances that started around our launch
-                            // (not a pre-existing copy the user had open).
-                            if (proc.StartTime >= launchedAt)
-                            {
-                                proc.Kill(entireProcessTree: true);
-                                closed++;
-                            }
-                        }
-                        catch { }
-                    }
-                    if (closed == 0)
-                    {
-                        // No matching new instance — fall back to closing any
-                        // running instance of this app name.
-                        foreach (var proc in System.Diagnostics.Process.GetProcessesByName(img))
-                        {
-                            try { proc.Kill(entireProcessTree: true); closed++; }
-                            catch { }
-                        }
-                    }
-                    return closed > 0 ? $"Closed {img} ({closed} process(es))." : "App is already closed.";
-                });
-            }
-
-            return exe != null
-                ? $"Opened {appName} ({exe})."
-                : $"Opened {appName} (resolved via shell).";
-        }
-        catch (Exception ex) { return $"Failed to open {appName}: {ex.Message}"; }
-    }
-
-    private static string? ResolveAppPath(string appName)
-    {
-        var name = appName.Trim().TrimEnd('.');
-        if (string.IsNullOrWhiteSpace(name)) return null;
-
-        if (File.Exists(name)) return null;
-
-        // App name with/without extension
-        var stem = name;
-        var ext = Path.GetExtension(name);
-        if (string.IsNullOrEmpty(ext))
-            stem = name;
-
-        // 1) Registry App Paths (most reliable for installed apps)
-        try
-        {
-            foreach (var hive in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
-            {
-                using var appsKey = hive.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\App Paths");
-                if (appsKey != null)
-                {
-                    foreach (var sub in appsKey.GetSubKeyNames())
-                    {
-                        if (sub.Equals(stem + ".exe", StringComparison.OrdinalIgnoreCase))
-                        {
-                            using var subKey = appsKey.OpenSubKey(sub);
-                            var v = subKey?.GetValue(null)?.ToString();
-                            if (!string.IsNullOrEmpty(v) && File.Exists(v)) return v;
-                        }
-                    }
-                }
-            }
-        }
-        catch { }
-
-        // 2) Start-menu shortcuts (.lnk) for human-friendly names like "Steam"
-        try
-        {
-            foreach (var dir in new[]
-            {
-                Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)
-            })
-            {
-                if (string.IsNullOrEmpty(dir)) continue;
-                foreach (var lnk in Directory.GetFiles(dir, "*.lnk", SearchOption.AllDirectories))
-                {
-                    if (Path.GetFileNameWithoutExtension(lnk).Equals(stem, StringComparison.OrdinalIgnoreCase))
-                        return lnk;
-                }
-            }
-        }
-        catch { }
-
-        // 3) Common install locations
-        foreach (var root in new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
-        })
-        {
-            if (string.IsNullOrEmpty(root)) continue;
-            foreach (var dir in Directory.GetDirectories(root, stem, SearchOption.AllDirectories))
-            {
-                var exe = Directory.GetFiles(dir, stem + ".exe", SearchOption.AllDirectories)
-                    .FirstOrDefault(f => Path.GetFileName(f).Equals(stem + ".exe", StringComparison.OrdinalIgnoreCase));
-                if (exe != null) return exe;
-            }
-        }
-
-        return null;
-    }
-
     private string HandleComputerSettings(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
@@ -3152,9 +3069,22 @@ var (v, m) = before;
     {
         try
         {
-            var psi = new System.Diagnostics.ProcessStartInfo(file, args) { CreateNoWindow = true, UseShellExecute = false };
+            var psi = new System.Diagnostics.ProcessStartInfo(file, args)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+            };
             var p = System.Diagnostics.Process.Start(psi);
-            return $"Executed: {file} {args}";
+            if (p == null) return $"Failed: could not start {file}";
+            p.WaitForExit(30000); // 30 second timeout
+            var stdout = p.StandardOutput.ReadToEnd();
+            var stderr = p.StandardError.ReadToEnd();
+            var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
+            return $"Exit code: {p.ExitCode}. {(string.IsNullOrEmpty(output) ? "No output." : output.Trim())}";
         }
         catch (Exception ex) { return $"Failed: {ex.Message}"; }
     }
@@ -3209,7 +3139,14 @@ var (v, m) = before;
         var date = args.GetValueOrDefault("date")?.ToString() ?? "";
         var time = args.GetValueOrDefault("time")?.ToString() ?? "";
         var message = args.GetValueOrDefault("message")?.ToString() ?? "";
-        return $"Reminder set: {date} {time} — {message}. (Reminders are logged but not yet pushed as notifications.)";
+        // Reminder persistence is not yet implemented; log it for now.
+        var logEntry = $"[Reminder] {date} {time} — {message}";
+        _ = Task.Run(async () =>
+        {
+            try { await _memory.LogAsync("system", logEntry); }
+            catch { }
+        });
+        return $"Reminder noted: {date} {time} — {message}. (Reminder notifications not yet implemented; logged locally.)";
     }
 
     private async Task<string> HandleBrowserControlAsync(Dictionary<string, object> args)
@@ -3242,331 +3179,6 @@ var (v, m) = before;
             catch (Exception ex) { return $"Failed: {ex.Message}"; }
         }
         return "Browser control: action not recognized or missing parameters.";
-    }
-
-    private static bool TryValidateToolPath(string raw, out string fullPath, out string error)
-    {
-        fullPath = "";
-        error = "";
-        if (string.IsNullOrWhiteSpace(raw)) { error = "A path is required."; return false; }
-        if (raw.StartsWith("\\\\", StringComparison.Ordinal) || raw.StartsWith("//", StringComparison.Ordinal) || raw.StartsWith(@"\\?\", StringComparison.Ordinal))
-        {
-            error = "UNC and device paths are not allowed.";
-            return false;
-        }
-        try { fullPath = Path.GetFullPath(raw); }
-        catch { error = "Invalid path."; return false; }
-        var profile = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
-            .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!fullPath.StartsWith(profile, StringComparison.OrdinalIgnoreCase) || fullPath.Length <= profile.Length)
-        {
-            error = "File operations are limited to files inside your user profile.";
-            return false;
-        }
-        return true;
-    }
-
-    private async Task<string> HandleFileProcessorAsync(Dictionary<string, object> args)
-    {
-        var action = args.GetValueOrDefault("action")?.ToString() ?? "";
-        var filePath = args.GetValueOrDefault("file_path")?.ToString() ?? "";
-        var content = args.GetValueOrDefault("content")?.ToString() ?? "";
-        var query = args.GetValueOrDefault("query")?.ToString() ?? "";
-        var validatedPath = filePath;
-        if (!string.IsNullOrEmpty(filePath) &&
-            !TryValidateToolPath(filePath, out validatedPath, out var pathError))
-            return $"{action}: {pathError}";
-        if (!string.IsNullOrEmpty(filePath)) filePath = validatedPath;
-
-        switch (action.ToLowerInvariant())
-        {
-            case "read":
-                if (string.IsNullOrEmpty(filePath)) return "read: missing file_path.";
-                if (!File.Exists(filePath)) return $"File not found: {filePath}";
-                try
-                {
-                    if (new FileInfo(filePath).Length > 10L * 1024 * 1024)
-                        return "read refused: file exceeds 10 MB.";
-                    var bytes = await File.ReadAllBytesAsync(filePath);
-                    // Text files: return as-is. Binary: describe.
-                    var text = SafeAsText(bytes);
-                    if (text != null)
-                        return text.Length <= 3200 ? text : text[..3200] + $"\n[...truncated, {text.Length} chars total]";
-                    return $"Binary file ({bytes.Length} bytes), extension {Path.GetExtension(filePath)}. Not shown as text.";
-                }
-                catch (Exception ex) { return $"read failed: {ex.Message}"; }
-
-            case "write":
-                if (string.IsNullOrEmpty(filePath)) return "write: missing file_path.";
-                Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
-                var hadOriginal = File.Exists(filePath);
-                if (hadOriginal && new FileInfo(filePath).Length > 10L * 1024 * 1024)
-                    return "write refused: existing file exceeds 10 MB.";
-                var original = hadOriginal ? await File.ReadAllTextAsync(filePath) : null;
-                await File.WriteAllTextAsync(filePath, content);
-                PushUndo($"file write({filePath})", () =>
-                {
-                    try
-                    {
-                        if (hadOriginal)
-                        {
-                            File.WriteAllText(filePath, original ?? "");
-                            return $"Restored original content of {filePath}.";
-                        }
-                        File.Delete(filePath);
-                        return $"Deleted newly created {filePath}.";
-                    }
-                    catch (Exception ex) { return $"Restore failed: {ex.Message}"; }
-                });
-                return $"Written {content.Length} chars to {filePath}.";
-
-            case "rename":
-            case "move":
-            {
-                var dest = args.GetValueOrDefault("destination")?.ToString()
-                           ?? args.GetValueOrDefault("new_path")?.ToString()
-                           ?? args.GetValueOrDefault("target")?.ToString() ?? "";
-                if (string.IsNullOrEmpty(filePath)) return $"{action}: missing file_path (source).";
-                if (string.IsNullOrEmpty(dest)) return $"{action}: missing destination.";
-                if (!TryValidateToolPath(dest, out var validatedDest, out var destError))
-                    return $"{action}: {destError}";
-                dest = validatedDest;
-                if (!File.Exists(filePath) && !Directory.Exists(filePath))
-                    return $"{action}: source not found: {filePath}";
-                if (File.Exists(dest) || Directory.Exists(dest))
-                    return $"{action}: destination already exists: {dest}";
-                try
-                {
-                    var isDir = Directory.Exists(filePath);
-                    if (isDir) Directory.Move(filePath, dest);
-                    else File.Move(filePath, dest);
-                    PushUndo($"{action} {Path.GetFileName(filePath)}", () =>
-                    {
-                        if (isDir) Directory.Move(dest, filePath);
-                        else File.Move(dest, filePath);
-                        return $"Moved {Path.GetFileName(dest)} back to {filePath}.";
-                    });
-                    return $"{action}: {filePath} -> {dest}";
-                }
-                catch (Exception ex) { return $"{action} failed: {ex.Message}"; }
-            }
-
-            case "copy":
-            {
-                var dest = args.GetValueOrDefault("destination")?.ToString()
-                           ?? args.GetValueOrDefault("new_path")?.ToString()
-                           ?? args.GetValueOrDefault("target")?.ToString() ?? "";
-                if (string.IsNullOrEmpty(filePath)) return "copy: missing file_path (source).";
-                if (string.IsNullOrEmpty(dest)) return "copy: missing destination.";
-                if (!TryValidateToolPath(dest, out var validatedDest, out var destError))
-                    return $"copy: {destError}";
-                dest = validatedDest;
-                if (!File.Exists(filePath) && !Directory.Exists(filePath))
-                    return $"copy: source not found: {filePath}";
-                if (File.Exists(dest) || Directory.Exists(dest))
-                    return $"copy: destination already exists: {dest}";
-                try
-                {
-                    if (Directory.Exists(filePath)) CopyDirectoryRecursive(filePath, dest);
-                    else File.Copy(filePath, dest);
-                    PushUndo($"copy {Path.GetFileName(filePath)}", () =>
-                    {
-                        DeleteTree(dest);
-                        return $"Deleted the copy {dest}.";
-                    });
-                    return $"copy: {filePath} -> {dest}";
-                }
-                catch (Exception ex) { return $"copy failed: {ex.Message}"; }
-            }
-
-            case "delete":
-            {
-                if (string.IsNullOrEmpty(filePath)) return "delete: missing file_path.";
-                if (File.Exists(filePath))
-                {
-                    try
-                    {
-                        var fi = new FileInfo(filePath);
-                        if (fi.Length > 400L * 1024 * 1024)
-                            return "delete refused: file exceeds 400 MB, undo would not be reliable.";
-                        var bytes = await File.ReadAllBytesAsync(filePath);
-                        var dir = Path.GetDirectoryName(filePath) ?? ".";
-                        File.Delete(filePath);
-                        PushUndo($"delete {Path.GetFileName(filePath)}", () =>
-                        {
-                            Directory.CreateDirectory(dir);
-                            File.WriteAllBytes(filePath, bytes);
-                            return $"Restored {filePath}.";
-                        });
-                        return $"deleted: {filePath}";
-                    }
-                    catch (Exception ex) { return $"delete failed: {ex.Message}"; }
-                }
-                if (Directory.Exists(filePath))
-                {
-                    try
-                    {
-                        var tree = CaptureDirTree(filePath);
-                        if (tree == null)
-                            return "delete refused: directory is too large or has too many files to be undoable.";
-                        Directory.Delete(filePath, recursive: true);
-                        PushUndo($"delete folder {Path.GetFileName(filePath)}", () =>
-                        {
-                            RestoreDirTree(filePath, tree);
-                            return $"Restored folder {filePath}.";
-                        });
-                        return $"deleted folder: {filePath}";
-                    }
-                    catch (Exception ex) { return $"delete failed: {ex.Message}"; }
-                }
-                return $"delete: path not found: {filePath}";
-            }
-
-            case "list":
-            case "browse":
-            {
-                if (string.IsNullOrEmpty(filePath)) return "list: missing file_path.";
-                if (!Directory.Exists(filePath)) return $"Directory not found: {filePath}";
-                try
-                {
-                    var dirs = Directory.GetDirectories(filePath, "*", SearchOption.TopDirectoryOnly);
-                    var files = Directory.GetFiles(filePath, "*", SearchOption.TopDirectoryOnly);
-                    var sb = new System.Text.StringBuilder();
-                    sb.AppendLine($"📁 {filePath}  ({dirs.Length} dirs, {files.Length} files)");
-                    foreach (var d in dirs.Take(40))
-                        sb.AppendLine($"  [DIR]  {Path.GetFileName(d)}");
-                    foreach (var f in files.Take(60))
-                    {
-                        var fi = new FileInfo(f);
-                        sb.AppendLine($"  {fi.Length,12:N0}  {Path.GetFileName(f)}");
-                    }
-                    if (dirs.Length > 40 || files.Length > 60)
-                        sb.AppendLine($"  ... {(dirs.Length - 40) + (files.Length - 60)} more entries");
-                    return sb.ToString();
-                }
-                catch (Exception ex) { return $"list failed: {ex.Message}"; }
-            }
-
-            case "search":
-                if (string.IsNullOrEmpty(query)) return "search: missing query.";
-                var root = string.IsNullOrEmpty(filePath) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : filePath;
-                if (!Directory.Exists(root)) return $"Directory not found: {root}";
-                try
-                {
-                    var hits = new System.Collections.Concurrent.ConcurrentBag<string>();
-                    var tasks = new List<Task>();
-                    foreach (var dir in SafeEnumerateDirs(root))
-                    {
-                        tasks.Add(Task.Run(() =>
-                        {
-                            try
-                            {
-                                foreach (var f in Directory.GetFiles(dir, "*" + query + "*"))
-                                    hits.Add(f);
-                            }
-                            catch { }
-                        }));
-                        if (tasks.Count >= 8)
-                        {
-                            Task.WaitAll(tasks.ToArray());
-                            tasks.Clear();
-                        }
-                        if (hits.Count >= 30) break;
-                    }
-                    if (tasks.Count > 0) Task.WaitAll(tasks.ToArray());
-                    var results = hits.OrderBy(x => x).Take(30).ToList();
-                    return results.Count > 0
-                        ? $"Matches for \"{query}\":\n" + string.Join("\n", results)
-                        : $"No matches for \"{query}\" under {root}.";
-                }
-                catch (Exception ex) { return $"search failed: {ex.Message}"; }
-
-            default:
-                return "File action not recognized. Actions: read, write, list/browse, search.";
-        }
-    }
-
-    private static IEnumerable<string> SafeEnumerateDirs(string root)
-    {
-        var stack = new Stack<string>();
-        stack.Push(root);
-        var count = 0;
-        while (stack.Count > 0 && count++ < 2000)
-        {
-            var dir = stack.Pop();
-            yield return dir;
-            try
-            {
-                foreach (var sub in Directory.GetDirectories(dir).Take(50))
-                    stack.Push(sub);
-            }
-            catch { }
-        }
-    }
-
-    private static string? SafeAsText(byte[] bytes)
-    {
-        if (bytes.Length == 0) return "";
-        if (bytes.Take(4).SequenceEqual(new byte[] { 0x50, 0x4B, 0x03, 0x04 })) return null; // zip
-        if (bytes.Take(2).SequenceEqual(new byte[] { 0x7F, 0x45 })) return null;             // ELF
-        foreach (var b in bytes.Take(4096))
-            if (b == 0) return null;   // contains NUL -> binary
-        return System.Text.Encoding.UTF8.GetString(bytes);
-    }
-
-    private sealed class UndoTreeEntry
-    {
-        public string Rel = "";
-        public bool IsDir;
-        public byte[]? Bytes;
-    }
-
-    private static void CopyDirectoryRecursive(string src, string dst)
-    {
-        Directory.CreateDirectory(dst);
-        foreach (var d in Directory.GetDirectories(src))
-            CopyDirectoryRecursive(d, Path.Combine(dst, Path.GetFileName(d)));
-        foreach (var f in Directory.GetFiles(src))
-            File.Copy(f, Path.Combine(dst, Path.GetFileName(f)));
-    }
-
-    private static void DeleteTree(string path)
-    {
-        if (File.Exists(path)) File.Delete(path);
-        else if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-    }
-
-    // Returns null if the directory is too large/many-files to safely hold in
-    // memory for an undo — in that case the caller must refuse the operation.
-    private static UndoTreeEntry[]? CaptureDirTree(string root)
-    {
-        var files = Directory.GetFiles(root, "*", SearchOption.AllDirectories);
-        var dirs = Directory.GetDirectories(root, "*", SearchOption.AllDirectories);
-        if (files.Length > 200) return null;
-        long total = 0;
-        foreach (var f in files)
-        {
-            total += new FileInfo(f).Length;
-            if (total > 200L * 1024 * 1024) return null;
-        }
-        var entries = new List<UndoTreeEntry>(dirs.Length + files.Length);
-        foreach (var d in dirs)
-            entries.Add(new UndoTreeEntry { Rel = Path.GetRelativePath(root, d), IsDir = true });
-        foreach (var f in files)
-            entries.Add(new UndoTreeEntry { Rel = Path.GetRelativePath(root, f), Bytes = File.ReadAllBytes(f) });
-        return entries.ToArray();
-    }
-
-    private static void RestoreDirTree(string root, UndoTreeEntry[] entries)
-    {
-        Directory.CreateDirectory(root);
-        foreach (var e in entries)
-        {
-            var full = Path.Combine(root, e.Rel);
-            if (e.IsDir) { Directory.CreateDirectory(full); continue; }
-            Directory.CreateDirectory(Path.GetDirectoryName(full) ?? ".");
-            File.WriteAllBytes(full, e.Bytes ?? Array.Empty<byte>());
-        }
     }
 
     private string HandleDesktopControl(Dictionary<string, object> args)
@@ -3798,8 +3410,8 @@ var (v, m) = before;
         var code = args.GetValueOrDefault("code")?.ToString() ?? "";
         var instruction = args.GetValueOrDefault("instruction")?.ToString() ?? "";
         if (string.IsNullOrEmpty(code)) return "No code supplied.";
-        // For now, return the code back with a note — Gemini can handle code analysis itself
-        return $"Code helper ({action}): I received {code.Length} characters of code. Analyze it directly.";
+        // This tool is a placeholder - code analysis is done by the AI model directly.
+        return $"Code helper ({action}): This tool is not yet implemented. The AI can analyze code directly in conversation.";
     }
 
     private string HandleSendMessage(Dictionary<string, object> args)
@@ -3807,7 +3419,14 @@ var (v, m) = before;
         var receiver = args.GetValueOrDefault("receiver")?.ToString() ?? "";
         var text = args.GetValueOrDefault("message_text")?.ToString() ?? "";
         var platform = args.GetValueOrDefault("platform")?.ToString() ?? "sms";
-        return $"Message to {receiver} via {platform}: \"{text}\". (Phone messaging requires ADB connection — use phone_* tools instead.)";
+        // Actual sending requires ADB/phone integration; this tool logs the intent.
+        var logEntry = $"[Message to {receiver} via {platform}] {text}";
+        _ = Task.Run(async () =>
+        {
+            try { await _memory.LogAsync("system", logEntry); }
+            catch { }
+        });
+        return $"Message logged for {receiver} via {platform}: \"{text}\". (Sending requires phone_* ADB tools; not yet implemented via this tool.)";
     }
 
     private string HandleSetAway(Dictionary<string, object> args)
