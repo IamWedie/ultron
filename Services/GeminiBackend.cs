@@ -4,13 +4,6 @@ using System.Text.Json;
 
 namespace Ultron.Services;
 
-public sealed class GeminiToolCall
-{
-    public required string Id { get; init; }
-    public required string Name { get; init; }
-    public required Dictionary<string, object> Args { get; init; }
-}
-
 /// <summary>Personality dials shipped to the Gemini backend as live system
 /// instructions. Defaults preserve the existing detached Ultron tone.</summary>
 public sealed class PersonaSettings
@@ -62,14 +55,12 @@ public sealed class GeminiBackend : IDisposable
     private bool _disposed;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
-    private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTools = new();
 
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan ToolCallTimeout = TimeSpan.FromSeconds(30);
 
     public event Action<string>? StatusChanged;
     public event Action<string, string>? TranscriptReceived; // role, text
-    public event Action<GeminiToolCall>? ToolCallReceived;
+    public event Action<ToolCall>? ToolCallReceived;
     public event Action<string, JsonElement>? ComputerActRequested; // id, action
     public event Action<string>? ErrorOccurred;
     public event Action? Disconnected;
@@ -80,7 +71,7 @@ public sealed class GeminiBackend : IDisposable
     public event Action<TelegramTargetResult>? TelegramTargetResolved;
     public event Action<string, string>? TelegramCallStateChanged;    // state, message
     public event Action<bool, string>? TelegramCallResult;            // ok, message
-    public event Action<string, string, string>? TelegramCallFallbackSent; // source, target, reason
+    public event Action<string, string, string, bool, string>? TelegramCallFallbackSent; // source, target, reason, ok, message
 
     public bool IsConnected => _proc is { HasExited: false };
     public string State { get; private set; } = "disconnected";
@@ -260,9 +251,6 @@ public sealed class GeminiBackend : IDisposable
         _runCts = null;
         BackendVersion = "";
         BackendCapabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in _pendingTools)
-            kv.Value.TrySetResult("Backend stopped while the tool was running.");
-        _pendingTools.Clear();
         State = "disconnected";
     }
 
@@ -298,22 +286,16 @@ public sealed class GeminiBackend : IDisposable
         await SendAsync(new { type = "voice_dsp", enabled, semitones, chorus, bass, darken });
     }
 
-    public async Task<string> SendToolResultAsync(string callId, string name, string result)
+    /// <summary>Deliver a tool result to the backend, which forwards it to Gemini.</summary>
+    /// <remarks>
+    /// This completes when the line is written, not when Gemini has seen it. The
+    /// Python side forwards the response and sends nothing back, so waiting for
+    /// an acknowledgement here would stall every tool call until a timeout while
+    /// Gemini had already received the real result.
+    /// </remarks>
+    public Task SendToolResultAsync(string callId, string name, ToolResult result)
     {
-        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingTools[callId] = tcs;
-        await SendAsync(new { type = "tool_result", id = callId, name, result });
-
-        using var cts = new CancellationTokenSource(ToolCallTimeout);
-        try
-        {
-            return await tcs.Task.WaitAsync(cts.Token);
-        }
-        catch
-        {
-            _pendingTools.Remove(callId);
-            return "Tool execution timed out.";
-        }
+        return SendAsync(new { type = "tool_result", id = callId, name, result = result.ToModelString() });
     }
 
     public async Task SendComputerActResultAsync(string id, string result)
@@ -489,20 +471,8 @@ public sealed class GeminiBackend : IDisposable
                 break;
 
             case "tool_call":
-                var id = msg.GetProperty("id").GetString() ?? "";
-                var name = msg.GetProperty("name").GetString() ?? "";
-                var args = new Dictionary<string, object>();
-                if (msg.TryGetProperty("args", out var argsEl) && argsEl.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in argsEl.EnumerateObject())
-                        args[prop.Name] = prop.Value.ToString();
-                }
-                ToolCallReceived?.Invoke(new GeminiToolCall
-                {
-                    Id = id,
-                    Name = name,
-                    Args = args,
-                });
+                if (TryReadToolCall(msg, out var toolCall))
+                    ToolCallReceived?.Invoke(toolCall);
                 break;
 
             case "error":
@@ -576,8 +546,56 @@ public sealed class GeminiBackend : IDisposable
                 var fbTarget = msg.TryGetProperty("target", out var ft) ? ft.GetString() ?? "" : "";
                 var fbSource = msg.TryGetProperty("source", out var fs) ? fs.GetString() ?? "" : "";
                 var fbReason = msg.TryGetProperty("reason", out var fr) ? fr.GetString() ?? "" : "";
-                TelegramCallFallbackSent?.Invoke(fbSource, fbTarget, fbReason);
+                var fbMessage = msg.TryGetProperty("message", out var fm) ? fm.GetString() ?? "" : "";
+                // ok=false means the owner was NOT reached: surface it instead of
+                // reporting a delivery that never happened.
+                TelegramCallFallbackSent?.Invoke(
+                    AppLog.Redact(fbSource),
+                    AppLog.Redact(fbTarget),
+                    AppLog.Redact(fbReason),
+                    fbOk,
+                    AppLog.Redact(fbMessage));
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Validates a tool_call frame coming from the backend process. This is an
+    /// untrusted boundary: a malformed frame is dropped with a log line rather
+    /// than thrown into the read loop, so one bad message cannot end the session.
+    /// </summary>
+    private bool TryReadToolCall(JsonElement msg, out ToolCall call)
+    {
+        call = null!;
+        var id = msg.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+        var name = msg.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "" : "";
+
+        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name))
+        {
+            Dbg($"Discarded tool_call with missing id/name: {AppLog.Redact(msg.GetRawText())}");
+            return false;
+        }
+
+        JsonElement args = default;
+        if (msg.TryGetProperty("args", out var argsEl) && argsEl.ValueKind != JsonValueKind.Undefined)
+        {
+            if (argsEl.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null))
+            {
+                Dbg($"Discarded tool_call '{name}': args must be an object.");
+                return false;
+            }
+            args = argsEl;
+        }
+
+        try
+        {
+            call = new ToolCall(id, name, args);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Dbg($"Discarded tool_call '{name}': {ex.Message}");
+            return false;
         }
     }
 
@@ -597,16 +615,12 @@ public sealed class GeminiBackend : IDisposable
         catch { }
     }
 
-    /// <summary>Fail any in-flight tool calls — a stuck/crashed backend must never
-    /// leave the C# side awaiting a result that will never arrive.</summary>
+    /// <summary>Mark the backend as gone after an unexpected process exit.</summary>
     private void OnProcessExited(object? sender, EventArgs e)
     {
         if (sender is Process process && !ReferenceEquals(_proc, process))
             return;
         Dbg("Process exited");
-        foreach (var kv in _pendingTools)
-            kv.Value.TrySetResult("Backend process exited while the tool was running.");
-        _pendingTools.Clear();
         State = "disconnected";
         Disconnected?.Invoke();
     }

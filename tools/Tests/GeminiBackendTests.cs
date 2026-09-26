@@ -21,13 +21,60 @@ public class GeminiBackendTests
     public void ProcessLine_ToolCall_RaisesEvent()
     {
         using var be = new GeminiBackend();
-        GeminiToolCall? call = null;
+        ToolCall? call = null;
         be.ToolCallReceived += c => call = c;
         be.ProcessLine("""{"type":"tool_call","id":"t1","name":"press_key","args":{"keys":"ctrl+s"}}""");
         Assert.NotNull(call);
         Assert.Equal("t1", call.Id);
         Assert.Equal("press_key", call.Name);
+        Assert.Equal("ctrl+s", call.GetString("keys"));
     }
+
+    [Fact]
+    public void ProcessLine_ToolCall_PreservesArgumentTypes()
+    {
+        using var be = new GeminiBackend();
+        ToolCall? call = null;
+        be.ToolCallReceived += c => call = c;
+        be.ProcessLine("""{"type":"tool_call","id":"t1","name":"press_key","args":{"keys":"ctrl+s","repeat":2,"upper":true}}""");
+        Assert.NotNull(call);
+        Assert.Equal(2, call!.GetInt32("repeat"));
+        Assert.True(call.GetBoolean("upper"));
+    }
+
+    [Fact]
+    public void ProcessLine_ToolCall_WithoutArgs_YieldsEmptyObject()
+    {
+        using var be = new GeminiBackend();
+        ToolCall? call = null;
+        be.ToolCallReceived += c => call = c;
+        be.ProcessLine("""{"type":"tool_call","id":"t1","name":"undo"}""");
+        Assert.NotNull(call);
+        Assert.Equal(JsonValueKind.Object, call!.Arguments.ValueKind);
+        Assert.Empty(call.Arguments.EnumerateObject());
+    }
+
+    [Theory]
+    // Missing/blank identity.
+    [InlineData("""{"type":"tool_call","name":"undo","args":{}}""")]
+    [InlineData("""{"type":"tool_call","id":"t1","args":{}}""")]
+    [InlineData("""{"type":"tool_call","id":"","name":"undo","args":{}}""")]
+    [InlineData("""{"type":"tool_call","id":"t1","name":"  ","args":{}}""")]
+    // Args must be an object, not a scalar or array.
+    [InlineData("""{"type":"tool_call","id":"t1","name":"undo","args":[1,2]}""")]
+    [InlineData("""{"type":"tool_call","id":"t1","name":"undo","args":"nope"}""")]
+    public void ProcessLine_MalformedToolCall_IsDroppedWithoutThrowing(string line)
+    {
+        using var be = new GeminiBackend();
+        var raised = false;
+        be.ToolCallReceived += _ => raised = true;
+
+        var ex = Record.Exception(() => be.ProcessLine(line));
+
+        Assert.Null(ex);
+        Assert.False(raised);
+    }
+
 
     [Fact]
     public void ProcessLine_ComputerAct_RaisesEventWithAction()
