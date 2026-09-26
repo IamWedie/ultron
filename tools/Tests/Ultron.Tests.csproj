@@ -21,6 +21,19 @@
     <Compile Include="..\..\Services\TrayIcon.cs" />
     <Compile Include="..\..\Services\HotkeyService.cs" />
     <Compile Include="..\..\Services\DashboardServer.cs" />
+    <!-- Tool layer: deliberately WinUI-free so routing/policy is unit-testable. -->
+    <Compile Include="..\..\Services\Tools\ToolCall.cs" />
+    <Compile Include="..\..\Services\Tools\ToolResult.cs" />
+    <Compile Include="..\..\Services\Tools\IToolHandler.cs" />
+    <Compile Include="..\..\Services\Tools\ToolPolicy.cs" />
+    <Compile Include="..\..\Services\Tools\PolicyEngine.cs" />
+    <Compile Include="..\..\Services\Tools\ToolRouter.cs" />
+    <Compile Include="..\..\Services\UndoLedger.cs" />
+    <Compile Include="..\..\Services\Tools\Files\PathPolicy.cs" />
+    <Compile Include="..\..\Services\Tools\Files\FileToolService.cs" />
+    <Compile Include="..\..\Services\Processes\IProcessLauncher.cs" />
+    <Compile Include="..\..\Services\Apps\AppResolver.cs" />
+    <Compile Include="..\..\Services\Tools\Apps\AppToolService.cs" />
   </ItemGroup>
 
   <ItemGroup>
