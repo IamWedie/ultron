@@ -55,7 +55,8 @@ public sealed class DashboardServer : IDisposable
 
     public static string NewToken()
     {
-        return Convert.ToHexString(RandomNumberGenerator.GetBytes(4))[..8];
+        // 128 bits of entropy (16 bytes = 32 hex chars)
+        return Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
     }
 
     public static string LanUrl(int port)
@@ -85,7 +86,9 @@ public sealed class DashboardServer : IDisposable
     {
         try
         {
-            var listener = new TcpListener(IPAddress.Loopback, _port);
+            // Bind to all interfaces (0.0.0.0) so the dashboard is accessible on LAN,
+            // not just localhost. The token provides authentication.
+            var listener = new TcpListener(IPAddress.Any, _port);
             listener.Start(512);
             ActualPort = ((IPEndPoint)listener.LocalEndpoint).Port;
             Running = true;
