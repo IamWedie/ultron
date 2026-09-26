@@ -67,14 +67,118 @@ public sealed class AdbClient
     private static readonly string[] ShellArg = ["shell"];
     private static readonly string[] DevicesArg = ["devices"];
 
-    private string Shell(string cmd, int timeout = 15)
+    /// <summary>
+    /// Execute an adb shell command with structured arguments (no shell metacharacter interpretation).
+    /// Use this for ALL commands that take user/AI-controlled input.
+    /// </summary>
+    private string ShellCommand(params string[] args)
     {
-        return Run(ShellArg.Concat(cmd.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToArray(), timeout);
+        var fullArgs = new string[ShellArg.Length + args.Length];
+        ShellArg.CopyTo(fullArgs, 0);
+        args.CopyTo(fullArgs, ShellArg.Length);
+        return Run(fullArgs, 15);
     }
 
+    /// <summary>
+    /// Execute adb shell with a raw command string.
+    /// ONLY use for hardcoded, trusted commands with NO user/AI input.
+    /// Marked obsolete to prevent new usage.
+    /// </summary>
+    [Obsolete("Use ShellCommand with structured arguments. ShellRaw executes via remote shell and is vulnerable to injection.")]
     private string ShellRaw(string cmd, int timeout = 15)
     {
         return Run(new[] { "shell", cmd }, timeout);
+    }
+
+    /// <summary>
+    /// Validates that a string contains only safe characters for adb arguments.
+    /// Allows alphanumeric, dash, underscore, dot, slash, colon, @, =, comma.
+    /// </summary>
+    private static bool IsSafeArg(string value, string paramName)
+    {
+        if (string.IsNullOrEmpty(value)) return true;
+        foreach (var c in value)
+        {
+            if (!((c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') ||
+                  c == '-' || c == '_' || c == '.' || c == '/' || c == ':' || c == '@' || c == '=' || c == ','))
+            {
+                throw new ArgumentException($"Invalid character in {paramName}: '{c}' (value: {value})");
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a file path for adb operations (no shell metacharacters).
+    /// </summary>
+    private static void ValidatePath(string path, string paramName)
+    {
+        if (string.IsNullOrEmpty(path)) throw new ArgumentException($"{paramName} cannot be empty");
+        foreach (var c in path)
+        {
+            if (c == ';' || c == '&' || c == '|' || c == '$' || c == '`' || c == '(' || c == ')' || c == '<' || c == '>' || c == '\n' || c == '\r')
+            {
+                throw new ArgumentException($"Invalid character in {paramName}: shell metacharacter detected");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Execute a simple adb shell command by parsing it into structured arguments.
+    /// Only works for simple commands without pipes, redirections, or shell metacharacters.
+    /// For complex commands, use ShellRaw (with caution) or restructure to use ShellCommand directly.
+    /// </summary>
+    private string Shell(string cmd, int timeout = 15)
+    {
+        // Simple parsing: split by spaces, but respect quoted strings
+        var args = ParseShellCommand(cmd);
+        return ShellCommand(args);
+    }
+
+    /// <summary>
+    /// Simple shell command parser for trusted, hardcoded commands.
+    /// Does NOT handle all shell features - only basic space splitting with quote support.
+    /// </summary>
+    private static string[] ParseShellCommand(string cmd)
+    {
+        var result = new List<string>();
+        var current = new System.Text.StringBuilder();
+        bool inQuotes = false;
+        char quoteChar = '\0';
+
+        for (int i = 0; i < cmd.Length; i++)
+        {
+            char c = cmd[i];
+            if ((c == '"' || c == '\'') && !inQuotes)
+            {
+                inQuotes = true;
+                quoteChar = c;
+            }
+            else if (c == quoteChar && inQuotes)
+            {
+                inQuotes = false;
+                quoteChar = '\0';
+            }
+            else if (c == ' ' && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    result.Add(current.ToString());
+                    current.Clear();
+                }
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+
+        if (current.Length > 0)
+            result.Add(current.ToString());
+
+        return result.ToArray();
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -252,19 +356,19 @@ public sealed class AdbClient
     public string ScreenBrightness(int level)
     {
         level = Math.Clamp(level, 0, 255);
-        ShellRaw($"settings put system screen_brightness {level}");
+        ShellCommand("settings", "put", "system", "screen_brightness", level.ToString());
         return $"Brightness set to {level}.";
     }
 
     public string ScreenRotation(bool auto)
     {
-        ShellRaw($"settings put system accelerometer_rotation {(auto ? 1 : 0)}");
+        ShellCommand("settings", "put", "system", "accelerometer_rotation", auto ? "1" : "0");
         return auto ? "Auto-rotation on." : "Auto-rotation off.";
     }
 
     public string ScreenRotate(int degrees)
     {
-        ShellRaw($"settings put system user_rotation {degrees / 90}");
+        ShellCommand("settings", "put", "system", "user_rotation", (degrees / 90).ToString());
         return $"Screen rotated to {degrees} degrees.";
     }
 
@@ -306,17 +410,22 @@ public sealed class AdbClient
 
     public string TypeText(string text)
     {
-        var escaped = text.Replace(" ", "%s").Replace("&", "\\&").Replace("'", "\\'").Replace("\"", "\\\"");
-        ShellRaw($"input text '{escaped}'");
+        if (string.IsNullOrEmpty(text)) return "No text to type.";
+        // Use structured command to avoid shell injection. The adb 'input text' command
+        // takes the text as a single argument when passed via ArgumentList.
+        ShellCommand("input", "text", text);
         return $"Typed: {text}";
     }
 
     public string TypeTextSlow(string text)
     {
+        if (string.IsNullOrEmpty(text)) return "No text to type.";
         foreach (var ch in text)
         {
-            if (ch == ' ') Shell("input keyevent KEYCODE_SPACE");
-            else ShellRaw($"input text '{ch}'");
+            if (ch == ' ')
+                ShellCommand("input", "keyevent", "KEYCODE_SPACE");
+            else
+                ShellCommand("input", "text", ch.ToString());
             Thread.Sleep(50);
         }
         return $"Typed slowly: {text}";
@@ -329,13 +438,14 @@ public sealed class AdbClient
 
     public string SetVolume(int level)
     {
-        ShellRaw($"media volume --set {level} --stream 3");
+        level = Math.Clamp(level, 0, 100);
+        ShellCommand("media", "volume", "--set", level.ToString(), "--stream", "3");
         return $"Media volume set to {level}.";
     }
 
     public string GetVolume()
     {
-        var out1 = ShellRaw("media volume --get --stream 3");
+        var out1 = ShellCommand("media", "volume", "--get", "--stream", "3");
         return !string.IsNullOrEmpty(out1) ? out1 : "Could not get volume.";
     }
 
@@ -345,26 +455,38 @@ public sealed class AdbClient
 
     public string OpenApp(string package)
     {
+        IsSafeArg(package, "package");
         if (package is "camera" or "cam") return OpenCamera();
-        if (package is "settings" or "setting") return ShellRaw("am start -a android.settings.SETTINGS") ?? "Settings opened.";
-        if (package is "chrome" or "browser") return ShellRaw("am start -a android.intent.action.VIEW -d http://www.google.com") ?? "Browser opened.";
-        if (package is "phone" or "dialer" or "dial") return ShellRaw("am start -a android.intent.action.DIAL") ?? "Dialer opened.";
-        if (package is "contacts" or "contact") return ShellRaw("am start -a android.intent.action.VIEW -d content://com.android.contacts/contacts") ?? "Contacts opened.";
-        if (package is "messages" or "sms" or "msg") return ShellRaw("am start -a android.intent.action.MAIN -c android.intent.category.APP_MESSAGING") ?? "Messages opened.";
-        if (package is "gallery" or "photos") return ShellRaw("am start -a android.intent.action.VIEW -d content://media/external/images/media") ?? "Gallery opened.";
+        if (package is "settings" or "setting") return ShellCommand("am", "start", "-a", "android.settings.SETTINGS") ?? "Settings opened.";
+        if (package is "chrome" or "browser") return ShellCommand("am", "start", "-a", "android.intent.action.VIEW", "-d", "http://www.google.com") ?? "Browser opened.";
+        if (package is "phone" or "dialer" or "dial") return ShellCommand("am", "start", "-a", "android.intent.action.DIAL") ?? "Dialer opened.";
+        if (package is "contacts" or "contact") return ShellCommand("am", "start", "-a", "android.intent.action.VIEW", "-d", "content://com.android.contacts/contacts") ?? "Contacts opened.";
+        if (package is "messages" or "sms" or "msg") return ShellCommand("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.APP_MESSAGING") ?? "Messages opened.";
+        if (package is "gallery" or "photos") return ShellCommand("am", "start", "-a", "android.intent.action.VIEW", "-d", "content://media/external/images/media") ?? "Gallery opened.";
         if (package == "youtube")
         {
             var comp = ResolveLaunchIntent("com.google.android.youtube");
-            if (comp is not null) { ShellRaw($"am start -n {comp}"); return "YouTube opened."; }
+            if (comp is not null) { ShellCommand("am", "start", "-n", comp); return "YouTube opened."; }
         }
         var resolved = ResolveLaunchIntent(package);
-        if (resolved is not null) { ShellRaw($"am start -n {resolved}"); return $"Opened {package}."; }
-        Shell($"monkey -p {package} -c android.intent.category.LAUNCHER 1");
+        if (resolved is not null) { ShellCommand("am", "start", "-n", resolved); return $"Opened {package}."; }
+        ShellCommand("monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1");
         return $"Opened {package} (via monkey fallback).";
     }
 
-    public string CloseApp(string package) { ShellRaw($"am force-stop {package}"); return $"Closed {package}."; }
-    public string ClearAppData(string package) { ShellRaw($"pm clear {package}"); return $"Cleared data for {package}."; }
+    public string CloseApp(string package)
+    {
+        IsSafeArg(package, "package");
+        ShellCommand("am", "force-stop", package);
+        return $"Closed {package}.";
+    }
+
+    public string ClearAppData(string package)
+    {
+        IsSafeArg(package, "package");
+        ShellCommand("pm", "clear", package);
+        return $"Cleared data for {package}.";
+    }
 
     public string ListApps()
     {
@@ -507,7 +629,7 @@ public sealed class AdbClient
 
     public string GetClipboard()
     {
-        var out1 = ShellRaw("dumpsys clipboard");
+        var out1 = ShellCommand("dumpsys", "clipboard");
         foreach (var line in out1.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             if (line.Contains("primary", StringComparison.OrdinalIgnoreCase) || line.Contains("text", StringComparison.OrdinalIgnoreCase))
@@ -518,20 +640,21 @@ public sealed class AdbClient
 
     public string SetClipboard(string text)
     {
-        ShellRaw($"am broadcast -a clipper.set -e text \"{text}\"");
-        ShellRaw($"input text '{text.Replace(" ", "%s")}'");
+        ShellCommand("am", "broadcast", "-a", "clipper.set", "-e", "text", text);
+        ShellCommand("input", "text", text);
         return $"Clipboard set: {text}";
     }
 
     public string ShareText(string text)
     {
-        ShellRaw($"am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT \"{text}\"");
+        ShellCommand("am", "start", "-a", "android.intent.action.SEND", "-t", "text/plain", "--es", "android.intent.extra.TEXT", text);
         return "Share dialog opened.";
     }
 
     public string ShareFile(string path)
     {
-        ShellRaw($"am start -a android.intent.action.SEND -t application/octet-stream --eu android.intent.extra.STREAM \"file://{path}\"");
+        ValidatePath(path, "path");
+        ShellCommand("am", "start", "-a", "android.intent.action.SEND", "-t", "application/octet-stream", "--eu", "android.intent.extra.STREAM", $"file://{path}");
         return $"Sharing {path}.";
     }
 
@@ -541,7 +664,8 @@ public sealed class AdbClient
 
     public string ListFiles(string path = "/sdcard/")
     {
-        var out1 = ShellRaw($"ls -la {path}");
+        ValidatePath(path, "path");
+        var out1 = ShellCommand("ls", "-la", path);
         return !string.IsNullOrEmpty(out1) ? out1 : $"Could not list {path}";
     }
 
@@ -553,27 +677,42 @@ public sealed class AdbClient
 
     public string FindFiles(string name)
     {
-        var out1 = ShellRaw($"find /sdcard -name '*{name}*' -type f 2>/dev/null | head -20");
+        IsSafeArg(name, "name");
+        var out1 = ShellCommand("find", "/sdcard", "-name", $"*{name}*", "-type", "f");
+        // Note: head -20 and 2>/dev/null removed as they require shell; results are truncated by caller if needed
         return !string.IsNullOrEmpty(out1) ? out1 : $"No files matching '{name}' found.";
     }
 
-    public string DeleteFile(string path) { ShellRaw($"rm -f {path}"); return $"Deleted {path}."; }
-    public string DeleteFolder(string path) { ShellRaw($"rm -rf {path}"); return $"Deleted folder {path}."; }
+    public string DeleteFile(string path)
+    {
+        ValidatePath(path, "path");
+        ShellCommand("rm", "-f", path);
+        return $"Deleted {path}.";
+    }
+
+    public string DeleteFolder(string path)
+    {
+        ValidatePath(path, "path");
+        ShellCommand("rm", "-rf", path);
+        return $"Deleted folder {path}.";
+    }
 
     public string FileInfo(string path)
     {
-        var out1 = ShellRaw($"ls -la {path}");
+        ValidatePath(path, "path");
+        var out1 = ShellCommand("ls", "-la", path);
         return !string.IsNullOrEmpty(out1) ? out1 : $"File not found: {path}";
     }
 
     public string StorageInfo()
     {
-        var out1 = Shell("df -h /sdcard");
+        var out1 = ShellCommand("df", "-h", "/sdcard");
         return !string.IsNullOrEmpty(out1) ? out1 : "Could not get storage info.";
     }
 
     public string PullFile(string phonePath, string? localDir = null)
     {
+        ValidatePath(phonePath, "phonePath");
         localDir ??= Path.GetTempPath();
         var local = Path.Combine(localDir, Path.GetFileName(phonePath));
         Run(new[] { "pull", phonePath, local });
@@ -582,17 +721,38 @@ public sealed class AdbClient
 
     public string PushFile(string localPath, string phonePath = "/sdcard/Download/")
     {
+        ValidatePath(phonePath, "phonePath");
         Run(new[] { "push", localPath, phonePath });
         return $"Pushed to {phonePath}.";
     }
 
-    public string CreateFolder(string path) { ShellRaw($"mkdir -p {path}"); return $"Created {path}."; }
-    public string MoveFile(string src, string dst) { ShellRaw($"mv {src} {dst}"); return $"Moved {src} to {dst}."; }
-    public string CopyFile(string src, string dst) { ShellRaw($"cp {src} {dst}"); return $"Copied {src} to {dst}."; }
+    public string CreateFolder(string path)
+    {
+        ValidatePath(path, "path");
+        ShellCommand("mkdir", "-p", path);
+        return $"Created {path}.";
+    }
+
+    public string MoveFile(string src, string dst)
+    {
+        ValidatePath(src, "src");
+        ValidatePath(dst, "dst");
+        ShellCommand("mv", src, dst);
+        return $"Moved {src} to {dst}.";
+    }
+
+    public string CopyFile(string src, string dst)
+    {
+        ValidatePath(src, "src");
+        ValidatePath(dst, "dst");
+        ShellCommand("cp", src, dst);
+        return $"Copied {src} to {dst}.";
+    }
 
     public string SearchFiles(string query)
     {
-        var out1 = ShellRaw($"find /sdcard -iname '*{query}*' 2>/dev/null | head -20");
+        IsSafeArg(query, "query");
+        var out1 = ShellCommand("find", "/sdcard", "-iname", $"*{query}*");
         return !string.IsNullOrEmpty(out1) ? out1 : $"No files matching '{query}'.";
     }
 
@@ -600,63 +760,81 @@ public sealed class AdbClient
     //  SETTINGS
     // ════════════════════════════════════════════════════════════════
 
-    public string WifiOn() { ShellRaw("svc wifi enable"); return "WiFi turned on."; }
-    public string WifiOff() { ShellRaw("svc wifi disable"); return "WiFi turned off."; }
+    public string WifiOn() { ShellCommand("svc", "wifi", "enable"); return "WiFi turned on."; }
+    public string WifiOff() { ShellCommand("svc", "wifi", "disable"); return "WiFi turned off."; }
     public string WifiStatus()
     {
-        var out1 = ShellRaw("dumpsys wifi | grep 'Wi-Fi is'");
-        if (string.IsNullOrEmpty(out1)) out1 = ShellRaw("settings get global wifi_on");
-        return !string.IsNullOrEmpty(out1) ? out1 : "Could not get WiFi status.";
+        var out1 = ShellCommand("dumpsys", "wifi");
+        foreach (var line in out1.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.Contains("Wi-Fi is", StringComparison.OrdinalIgnoreCase))
+                return line.Trim();
+        }
+        var out2 = ShellCommand("settings", "get", "global", "wifi_on");
+        return !string.IsNullOrEmpty(out2) ? out2 : "Could not get WiFi status.";
     }
 
-    public string BluetoothOn() { ShellRaw("svc bluetooth enable"); return "Bluetooth turned on."; }
-    public string BluetoothOff() { ShellRaw("svc bluetooth disable"); return "Bluetooth turned off."; }
+    public string BluetoothOn() { ShellCommand("svc", "bluetooth", "enable"); return "Bluetooth turned on."; }
+    public string BluetoothOff() { ShellCommand("svc", "bluetooth", "disable"); return "Bluetooth turned off."; }
     public string BluetoothStatus()
     {
-        var out1 = ShellRaw("settings get global bluetooth_on");
+        var out1 = ShellCommand("settings", "get", "global", "bluetooth_on");
         if (string.IsNullOrEmpty(out1)) return "Could not get Bluetooth status.";
         return $"Bluetooth is {(out1.Trim() == "1" ? "on" : "off")}.";
     }
 
-    public string AirplaneOn() { ShellRaw("settings put global airplane_mode_on 1"); ShellRaw("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true"); return "Airplane mode ON."; }
-    public string AirplaneOff() { ShellRaw("settings put global airplane_mode_on 0"); ShellRaw("am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false"); return "Airplane mode OFF."; }
-    public string HotspotOn() { ShellRaw("svc wifi setsoftap enable"); return "Hotspot turned on."; }
-    public string HotspotOff() { ShellRaw("svc wifi setsoftap disable"); return "Hotspot turned off."; }
-    public string DndOn() { ShellRaw("settings put global zen_mode 2"); return "Do Not Disturb ON."; }
-    public string DndOff() { ShellRaw("settings put global zen_mode 0"); return "Do Not Disturb OFF."; }
+    public string AirplaneOn() { ShellCommand("settings", "put", "global", "airplane_mode_on", "1"); ShellCommand("am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "true"); return "Airplane mode ON."; }
+    public string AirplaneOff() { ShellCommand("settings", "put", "global", "airplane_mode_on", "0"); ShellCommand("am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "false"); return "Airplane mode OFF."; }
+    public string HotspotOn() { ShellCommand("svc", "wifi", "setsoftap", "enable"); return "Hotspot turned on."; }
+    public string HotspotOff() { ShellCommand("svc", "wifi", "setsoftap", "disable"); return "Hotspot turned off."; }
+    public string DndOn() { ShellCommand("settings", "put", "global", "zen_mode", "2"); return "Do Not Disturb ON."; }
+    public string DndOff() { ShellCommand("settings", "put", "global", "zen_mode", "0"); return "Do Not Disturb OFF."; }
 
     public string FlashlightOn()
     {
-        ShellRaw("cmd statusbar expand-notifications");
+        ShellCommand("cmd", "statusbar", "expand-notifications");
         Thread.Sleep(500);
-        ShellRaw("input tap 540 1200");
+        ShellCommand("input", "tap", "540", "1200");
         return "Flashlight toggled (via quick settings).";
     }
 
     public string FlashlightOff() => FlashlightOn();
 
-    public string LocationOn() { ShellRaw("settings put secure location_mode 3"); return "Location turned on."; }
-    public string LocationOff() { ShellRaw("settings put secure location_mode 0"); return "Location turned off."; }
-    public string NfcOn() { ShellRaw("svc nfc enable"); return "NFC turned on."; }
-    public string NfcOff() { ShellRaw("svc nfc disable"); return "NFC turned off."; }
-    public string AutoRotateOn() { ShellRaw("settings put system accelerometer_rotation 1"); return "Auto-rotate on."; }
-    public string AutoRotateOff() { ShellRaw("settings put system accelerometer_rotation 0"); return "Auto-rotate off."; }
+    public string LocationOn() { ShellCommand("settings", "put", "secure", "location_mode", "3"); return "Location turned on."; }
+    public string LocationOff() { ShellCommand("settings", "put", "secure", "location_mode", "0"); return "Location turned off."; }
+    public string NfcOn() { ShellCommand("svc", "nfc", "enable"); return "NFC turned on."; }
+    public string NfcOff() { ShellCommand("svc", "nfc", "disable"); return "NFC turned off."; }
+    public string AutoRotateOn() { ShellCommand("settings", "put", "system", "accelerometer_rotation", "1"); return "Auto-rotate on."; }
+    public string AutoRotateOff() { ShellCommand("settings", "put", "system", "accelerometer_rotation", "0"); return "Auto-rotate off."; }
 
     public string GetSettings(string category)
     {
-        var cmds = new Dictionary<string, string>
+        var cmds = new Dictionary<string, string[]>
         {
-            ["wifi"] = "settings list global | grep -i wifi",
-            ["bluetooth"] = "settings list global | grep -i bluetooth",
-            ["display"] = "settings list system | grep -i -E 'screen|bright|font|rotation'",
-            ["sound"] = "settings list system | grep -i -E 'volume|ring|notification|alarm'",
-            ["security"] = "settings list secure | grep -i -E 'lock|screen|password'",
-            ["all_global"] = "settings list global",
-            ["all_system"] = "settings list system",
-            ["all_secure"] = "settings list secure",
+            ["wifi"] = ["settings", "list", "global"],
+            ["bluetooth"] = ["settings", "list", "global"],
+            ["display"] = ["settings", "list", "system"],
+            ["sound"] = ["settings", "list", "system"],
+            ["security"] = ["settings", "list", "secure"],
+            ["all_global"] = ["settings", "list", "global"],
+            ["all_system"] = ["settings", "list", "system"],
+            ["all_secure"] = ["settings", "list", "secure"],
         };
-        var out1 = ShellRaw(cmds.GetValueOrDefault(category, $"settings list {category}"));
-        return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : $"No settings found for '{category}'.");
+        if (!cmds.TryGetValue(category, out var cmd))
+            cmd = ["settings", "list", category];
+        var out1 = ShellCommand(cmd);
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => category switch
+            {
+                "wifi" => l.Contains("wifi", StringComparison.OrdinalIgnoreCase),
+                "bluetooth" => l.Contains("bluetooth", StringComparison.OrdinalIgnoreCase),
+                "display" => l.Contains("screen", StringComparison.OrdinalIgnoreCase) || l.Contains("bright", StringComparison.OrdinalIgnoreCase) || l.Contains("font", StringComparison.OrdinalIgnoreCase) || l.Contains("rotation", StringComparison.OrdinalIgnoreCase),
+                "sound" => l.Contains("volume", StringComparison.OrdinalIgnoreCase) || l.Contains("ring", StringComparison.OrdinalIgnoreCase) || l.Contains("notification", StringComparison.OrdinalIgnoreCase) || l.Contains("alarm", StringComparison.OrdinalIgnoreCase),
+                "security" => l.Contains("lock", StringComparison.OrdinalIgnoreCase) || l.Contains("screen", StringComparison.OrdinalIgnoreCase) || l.Contains("password", StringComparison.OrdinalIgnoreCase),
+                _ => true
+            })
+            .Take(50));
+        return filtered.Length > 2000 ? filtered[..2000] : (filtered.Length > 0 ? filtered : $"No settings found for '{category}'.");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -665,7 +843,7 @@ public sealed class AdbClient
 
     public string IpAddress()
     {
-        var out1 = Shell("ip addr show wlan0");
+        var out1 = ShellCommand("ip", "addr", "show", "wlan0");
         foreach (var line in out1.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             if (line.Contains("inet "))
@@ -676,60 +854,77 @@ public sealed class AdbClient
 
     public string Ping(string host)
     {
-        var out1 = ShellRaw($"ping -c 3 {host}");
+        IsSafeArg(host, "host");
+        var out1 = ShellCommand("ping", "-c", "3", host);
         return !string.IsNullOrEmpty(out1) ? out1 : "Ping failed.";
     }
 
     public string WifiScan()
     {
-        var out1 = ShellRaw("cmd wifi list-scan-results");
+        var out1 = ShellCommand("cmd", "wifi", "list-scan-results");
         return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : "No scan results.");
     }
 
     public string WifiInfo()
     {
-        var out1 = ShellRaw("dumpsys wifi | grep -A5 'mWifiInfo'");
-        return out1.Length > 1000 ? out1[..1000] : (!string.IsNullOrEmpty(out1) ? out1 : "Could not get WiFi info.");
+        var out1 = ShellCommand("dumpsys", "wifi");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.Contains("mWifiInfo", StringComparison.OrdinalIgnoreCase))
+            .Take(20));
+        return filtered.Length > 1000 ? filtered[..1000] : (filtered.Length > 0 ? filtered : "Could not get WiFi info.");
     }
 
     public string ConnectedNetwork()
     {
-        var out1 = ShellRaw("dumpsys connectivity | grep 'NetworkAgentInfo'");
-        return out1.Length > 500 ? out1[..500] : (!string.IsNullOrEmpty(out1) ? out1 : "Could not determine connected network.");
+        var out1 = ShellCommand("dumpsys", "connectivity");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.Contains("NetworkAgentInfo", StringComparison.OrdinalIgnoreCase))
+            .Take(10));
+        return filtered.Length > 500 ? filtered[..500] : (filtered.Length > 0 ? filtered : "Could not determine connected network.");
     }
 
     // ════════════════════════════════════════════════════════════════
     //  CALLS & SMS
     // ════════════════════════════════════════════════════════════════
 
-    public string MakeCall(string number) { ShellRaw($"am start -a android.intent.action.CALL -d tel:{number}"); return $"Calling {number}..."; }
+    public string MakeCall(string number)
+    {
+        IsSafeArg(number, "number");
+        ShellCommand("am", "start", "-a", "android.intent.action.CALL", "-d", $"tel:{number}");
+        return $"Calling {number}...";
+    }
     public string PhoneCall(string number) => MakeCall(number);
-    public string AnswerCall() { ShellRaw("input keyevent KEYCODE_CALL"); return "Call answered."; }
-    public string RejectCall() { ShellRaw("input keyevent KEYCODE_ENDCALL"); return "Call rejected."; }
-    public string EndCall() { ShellRaw("input keyevent KEYCODE_ENDCALL"); return "Call ended."; }
+    public string AnswerCall() { ShellCommand("input", "keyevent", "KEYCODE_CALL"); return "Call answered."; }
+    public string RejectCall() { ShellCommand("input", "keyevent", "KEYCODE_ENDCALL"); return "Call rejected."; }
+    public string EndCall() { ShellCommand("input", "keyevent", "KEYCODE_ENDCALL"); return "Call ended."; }
 
     public string SendSms(string number, string message)
     {
-        ShellRaw($"am start -a android.intent.action.SENDTO -d \"sms:{number}\" --es sms_body \"{message}\" --ez exit_on_sent true");
+        IsSafeArg(number, "number");
+        ShellCommand("am", "start", "-a", "android.intent.action.SENDTO", "-d", $"sms:{number}", "--es", "sms_body", message, "--ez", "exit_on_sent", "true");
         return $"SMS to {number}: {message}";
     }
 
     public string ReadSms(int limit = 20)
     {
-        var out1 = ShellRaw($"content query --uri content://sms/inbox --projection date,address,body --limit {limit}");
+        limit = Math.Clamp(limit, 1, 100);
+        var out1 = ShellCommand("content", "query", "--uri", "content://sms/inbox", "--projection", "date,address,body", "--limit", limit.ToString());
         if (string.IsNullOrEmpty(out1)) return "No SMS available.";
         return string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(20));
     }
 
     public string ReadNotifications()
     {
-        var out1 = ShellRaw("dumpsys notification --noredact | grep -E 'pkg=|title=|text=' | head -30");
-        return !string.IsNullOrEmpty(out1) ? out1 : "No notifications.";
+        var out1 = ShellCommand("dumpsys", "notification", "--noredact");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.Contains("pkg=", StringComparison.OrdinalIgnoreCase) || l.Contains("title=", StringComparison.OrdinalIgnoreCase) || l.Contains("text=", StringComparison.OrdinalIgnoreCase))
+            .Take(30));
+        return filtered.Length > 0 ? filtered : "No notifications.";
     }
 
     public string ClearNotifications()
     {
-        ShellRaw("service call statusbar 2");
+        ShellCommand("service", "call", "statusbar", "2");
         return "Notifications cleared.";
     }
 
@@ -739,22 +934,28 @@ public sealed class AdbClient
 
     public string ListContacts()
     {
-        var out1 = ShellRaw("content query --uri content://com.android.contacts/contacts --projection display_name 2>/dev/null");
+        var out1 = ShellCommand("content", "query", "--uri", "content://com.android.contacts/contacts", "--projection", "display_name");
         if (string.IsNullOrEmpty(out1) || out1.Contains("error", StringComparison.OrdinalIgnoreCase))
-            out1 = ShellRaw("dumpsys contactprovider | grep 'display_name' | head -20");
-        return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : "Could not read contacts.");
+            out1 = ShellCommand("dumpsys", "contactprovider");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.Contains("display_name", StringComparison.OrdinalIgnoreCase))
+            .Take(20));
+        return filtered.Length > 2000 ? filtered[..2000] : (filtered.Length > 0 ? filtered : "Could not read contacts.");
     }
 
     public string SearchContacts(string name)
     {
-        var out1 = ShellRaw($"content query --uri content://com.android.contacts/contacts --projection display_name --where \"display_name LIKE '%{name}%'\" | head -10");
-        return !string.IsNullOrEmpty(out1) ? out1 : $"No contacts matching '{name}'.";
+        IsSafeArg(name, "name");
+        var out1 = ShellCommand("content", "query", "--uri", "content://com.android.contacts/contacts", "--projection", "display_name", "--where", $"display_name LIKE '%{name}%'");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(10));
+        return filtered.Length > 0 ? filtered : $"No contacts matching '{name}'.";
     }
 
     public string ListCalendar()
     {
-        var out1 = ShellRaw("content query --uri content://com.android.calendar/events --projection title:dtstart | head -10");
-        return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : "No calendar events found.");
+        var out1 = ShellCommand("content", "query", "--uri", "content://com.android.calendar/events", "--projection", "title:dtstart");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(10));
+        return filtered.Length > 2000 ? filtered[..2000] : (filtered.Length > 0 ? filtered : "No calendar events found.");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -782,13 +983,15 @@ public sealed class AdbClient
             ["security_patch"] = "getprop ro.build.version.security_patch",
             ["serial"] = "getprop ro.serialno",
             ["cpu"] = "getprop ro.hardware",
-            ["ram"] = "cat /proc/meminfo | head -1",
+            ["ram"] = "cat /proc/meminfo",
             ["uptime"] = "cat /proc/uptime",
         };
         var lines = new List<string>();
         foreach (var kv in props)
         {
-            var val = kv.Value.StartsWith("cat ", StringComparison.Ordinal) || kv.Value.StartsWith("getprop ", StringComparison.Ordinal) ? Shell(kv.Value) : ShellRaw(kv.Value);
+            var val = kv.Value.StartsWith("cat ", StringComparison.Ordinal) || kv.Value.StartsWith("getprop ", StringComparison.Ordinal) ? ShellCommand(kv.Value.Split(' ')) : ShellCommand(kv.Value.Split(' '));
+            // Take only first line for ram
+            if (kv.Key == "ram") val = val.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
             lines.Add($"{kv.Key}: {val}");
         }
         return string.Join("\n", lines);
@@ -796,54 +999,77 @@ public sealed class AdbClient
 
     public string RunningProcesses()
     {
-        var out1 = ShellRaw("ps -A | head -30");
-        return !string.IsNullOrEmpty(out1) ? out1 : "Could not list processes.";
+        var out1 = ShellCommand("ps", "-A");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(30));
+        return filtered.Length > 0 ? filtered : "Could not list processes.";
     }
 
     public string DiskUsage()
     {
-        var out1 = Shell("df -h");
+        var out1 = ShellCommand("df", "-h");
         return !string.IsNullOrEmpty(out1) ? out1 : "Could not get disk usage.";
     }
 
     public string Logcat(int lines = 20)
     {
-        var out1 = ShellRaw($"logcat -d -t {lines}");
+        lines = Math.Clamp(lines, 1, 100);
+        var out1 = ShellCommand("logcat", "-d", "-t", lines.ToString());
         return out1.Length > 3000 ? out1[..3000] : (!string.IsNullOrEmpty(out1) ? out1 : "No log entries.");
     }
 
-    public string GetProp(string prop) => Shell($"getprop {prop}");
+    public string GetProp(string prop)
+    {
+        IsSafeArg(prop, "prop");
+        return ShellCommand("getprop", prop);
+    }
 
     public string SetProp(string prop, string value)
     {
-        ShellRaw($"setprop {prop} {value}");
+        IsSafeArg(prop, "prop");
+        IsSafeArg(value, "value");
+        ShellCommand("setprop", prop, value);
         return $"Set {prop} = {value}.";
     }
 
     public string InstalledPackages()
     {
-        var out1 = Shell("pm list packages -f | head -30");
-        return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : "No packages.");
+        var out1 = ShellCommand("pm", "list", "packages", "-f");
+        var filtered = string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(30));
+        return filtered.Length > 2000 ? filtered[..2000] : (filtered.Length > 0 ? filtered : "No packages.");
     }
 
-    public string GrantPermission(string package, string permission) { ShellRaw($"pm grant {package} {permission}"); return $"Granted {permission} to {package}."; }
-    public string RevokePermission(string package, string permission) { ShellRaw($"pm revoke {package} {permission}"); return $"Revoked {permission} from {package}."; }
+    public string GrantPermission(string package, string permission)
+    {
+        IsSafeArg(package, "package");
+        IsSafeArg(permission, "permission");
+        ShellCommand("pm", "grant", package, permission);
+        return $"Granted {permission} to {package}.";
+    }
+
+    public string RevokePermission(string package, string permission)
+    {
+        IsSafeArg(package, "package");
+        IsSafeArg(permission, "permission");
+        ShellCommand("pm", "revoke", package, permission);
+        return $"Revoked {permission} from {package}.";
+    }
 
     public string Notify(string title, string message)
     {
-        ShellRaw($"cmd notification post -S bigtext -t \"{title}\" \"ultron\" \"{message}\" 2>/dev/null");
+        ShellCommand("cmd", "notification", "post", "-S", "bigtext", "-t", title, "ultron", message);
         return $"Notification sent: {title} — {message}";
     }
 
     public string RingPhone()
     {
-        ShellRaw("input keyevent KEYCODE_MEDIA_PLAY_PAUSE");
+        ShellCommand("input", "keyevent", "KEYCODE_MEDIA_PLAY_PAUSE");
         return "Attempted to ring phone.";
     }
 
     public string Vibrate(int ms = 500)
     {
-        ShellRaw($"input vibrationtime {ms}");
+        ms = Math.Clamp(ms, 0, 5000);
+        ShellCommand("input", "vibrationtime", ms.ToString());
         return $"Vibrated {ms}ms.";
     }
 
