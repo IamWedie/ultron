@@ -2000,6 +2000,9 @@ class GeminiSession:
         elif msg_type == "telegram_resolve_target":
             if self.telegram is not None:
                 await self.telegram.resolve_target(msg)
+        elif msg_type == "telegram_set_target_lock":
+            if self.telegram is not None:
+                await self.telegram.set_target_lock(msg)
         elif msg_type == "telegram_call_start":
             if self.telegram is not None:
                 await self.telegram.call_start(

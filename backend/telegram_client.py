@@ -33,6 +33,20 @@ APP_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Ultron"
 )
 SESSION_FILE = os.path.join(APP_DIR, "telegram.session")
+TARGET_LOCK_FILE = os.path.join(APP_DIR, "target_lock.dat")
+
+# Owner-facing wording for failures that happen before a phone rings. These
+# appear in the text the owner actually reads, so they avoid internal names.
+_FAILURE_REASON_TEXT = {
+    "calls_disabled": "Telegram calling is turned off",
+    "no_target": "no call target is configured",
+    "no_credentials": "Telegram api_id/api_hash are not configured",
+    "no_session": "the Telegram account is not logged in",
+    "not_authorized": "the Telegram account is not authorized",
+    "invalid_target": "the call target is not a person",
+    "request_failed": "Telegram rejected the call request",
+    "connect_failed": "the call connection could not be established",
+}
 
 # ---------------------------------------------------------------------------
 # Windows DPAPI helpers (no pywin32 dependency)
@@ -153,6 +167,51 @@ def clear_session() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Call target lock (DPAPI-encrypted, one-time safety net)
+# ---------------------------------------------------------------------------
+
+
+def load_target_lock() -> Optional[str]:
+    """Return the locked call target user id, or None when not locked.
+
+    Kept in its own DPAPI-encrypted file rather than config.dat so the Python
+    side never rewrites settings the C# side owns.
+    """
+    try:
+        if not os.path.exists(TARGET_LOCK_FILE):
+            return None
+        with open(TARGET_LOCK_FILE, "r", encoding="ascii") as f:
+            value = _unprotect(f.read().strip()).decode("utf-8").strip()
+            return value or None
+    except Exception:
+        return None
+
+
+def save_target_lock(user_id: str) -> None:
+    os.makedirs(APP_DIR, exist_ok=True)
+    blob = _protect(str(user_id).encode("utf-8"))
+    fd, temporary = tempfile.mkstemp(prefix=".target-lock-", suffix=".tmp", dir=APP_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(blob)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, TARGET_LOCK_FILE)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def clear_target_lock() -> None:
+    try:
+        os.remove(TARGET_LOCK_FILE)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Controller
 # ---------------------------------------------------------------------------
 
@@ -179,6 +238,19 @@ class TelegramController:
         self._target_username = ""
         self._target_name = ""
         self._audio_bridge = None
+        self._fallback_sent = False
+        # Call-attempt state lives here, not only in _run_call_task, because a
+        # call can be refused before the task starts and still owes the owner a
+        # fallback text.
+        self._call_payload: dict = {}
+        self._call_phase = "idle"
+        self._call_start_ts = 0.0
+        self._call_answered_ts: Optional[float] = None
+        self._call_first_speech_ts: Optional[float] = None
+        self._call_first_real_speech_ts: Optional[float] = None
+        # Resolved identity the owner confirmed at setup. While set, a Settings
+        # edit cannot silently redirect calls to somebody else.
+        self._locked_target_user_id: Optional[str] = load_target_lock()
 
     @property
     def audio_bridge(self):
@@ -474,6 +546,14 @@ class TelegramController:
                        message="Telegram account not configured.")
             return
 
+        # A locked target is only replaced by an explicit unlock, never by
+        # whatever the Settings text currently happens to contain.
+        if self._locked_target_user_id is not None:
+            self._emit(type="telegram_target_result", ok=False, locked=True,
+                       message="Call target is locked to the user id set during "
+                               "setup. Unlock it in Settings to change it.")
+            return
+
         self._target_user_id = None
         self._target_access_hash = None
         self._target_username = ""
@@ -511,14 +591,31 @@ class TelegramController:
             self._target_access_hash = input_peer.access_hash
             self._target_username = getattr(entity, "username", None) or ""
             self._target_name = getattr(entity, "first_name", "") or ""
+            # One-time safety net: the first proven setup pins the identity, so
+            # a later typo in the Settings field cannot redirect alerts.
+            first_lock = self._locked_target_user_id is None
+            if first_lock:
+                self._locked_target_user_id = self._target_user_id
+                try:
+                    save_target_lock(self._target_user_id)
+                except Exception as e:
+                    self._locked_target_user_id = None
+                    self._emit(type="telegram_target_lock", locked=False,
+                               message="Could not persist the target lock: "
+                                       f"{type(e).__name__}")
             name_part = "" if entity.bot else f" ({self._target_name})".strip()
             self._emit(type="telegram_target_result", ok=True,
                        target=self._target_username or target,
                        user_id=self._target_user_id,
                        name=self._target_name,
                        callable=True,
+                       locked=bool(self._locked_target_user_id),
                        message=f"Target resolved: {self._target_username or '<user>'}{name_part} "
                                f"[{self._target_user_id}]")
+            if first_lock and self._locked_target_user_id is not None:
+                self._emit(type="telegram_target_lock", locked=True,
+                           user_id=self._target_user_id,
+                           message="Call target locked. Unlock it in Settings to change it.")
         except Exception as e:
             self._emit(type="telegram_target_result", ok=False,
                        message=f"Could not resolve target: "
@@ -529,6 +626,37 @@ class TelegramController:
                     await client.disconnect()
                 except Exception:
                     pass
+
+    async def set_target_lock(self, msg: dict) -> None:
+        """Lock the resolved call target, or unlock it to allow a change.
+
+        Locking is the default after the first successful setup. Unlocking is
+        the only way to repoint the account at a different person, and it is
+        always an explicit request rather than a side effect of typing.
+        """
+        wants_lock = self._parse_bool(msg.get("locked"), True)
+        if wants_lock:
+            if not self._target_user_id:
+                self._emit(type="telegram_target_lock", locked=False,
+                           message="No call target is resolved, so there is "
+                                   "nothing to lock yet.")
+                return
+            try:
+                save_target_lock(self._target_user_id)
+            except Exception as e:
+                self._emit(type="telegram_target_lock", locked=False,
+                           message=f"Could not persist the target lock: {type(e).__name__}")
+                return
+            self._locked_target_user_id = self._target_user_id
+            self._emit(type="telegram_target_lock", locked=True,
+                       user_id=self._target_user_id,
+                       message="Call target locked to the currently resolved user.")
+            return
+
+        clear_target_lock()
+        self._locked_target_user_id = None
+        self._emit(type="telegram_target_lock", locked=False,
+                   message="Call target unlocked. Resolve a target to lock it again.")
 
     # -- call state machine (Phase C7) ----------------------------------------
 
@@ -635,43 +763,68 @@ class TelegramController:
             return None
         return None
 
+    async def _fail_call(self, client, message: str, reason: str) -> None:
+        """Report a call failure and still try to reach the owner by text.
+
+        A failure before the phone rings (unauthorized session, bad target,
+        network error, media setup) produces no ring and no unanswered call,
+        so the text fallback is the only remaining delivery path. Every
+        non-cancel failure routes through here: the point of the feature is
+        that the owner always ends up informed, and a silent drop is the one
+        outcome that breaks that.
+        """
+        await self._call_emit_state("error", message)
+        await self._evaluate_and_send_fallback(client, reason)
+
+    async def _refuse_call_start(self, message: str, reason: str) -> None:
+        """Refuse a call that cannot start, still attempting the text fallback."""
+        self._emit(type="telegram_call_result", ok=False, message=message)
+        await self._evaluate_and_send_fallback(self._client, reason)
+
     async def call_start(self, msg: dict, mic_queue: asyncio.Queue = None, audio_out_queue: asyncio.Queue = None) -> None:
         """Start an outgoing Telegram voice call (C7/C8 state machine with fallback)."""
-        if not self._calls_enabled():
-            self._emit(type="telegram_call_result", ok=False,
-                       message="Telegram calling is disabled (TelegramCallEnabled=false).")
-            return
-
-        # C10: Concurrent call prevention
+        # C10: Concurrent call prevention. The call already in progress is
+        # itself a delivery attempt, so this refusal deliberately does not add
+        # a second text on top of it, and it must not overwrite the payload
+        # that the running call still needs for its own fallback.
         if hasattr(self, "_call_task") and self._call_task and not self._call_task.done():
             self._emit(type="telegram_call_result", ok=False,
                        message="Call already in progress. Stop current call first.")
             return
 
+        # Extract the payload (notification content for the text fallback) up
+        # front so every refusal below can still deliver it, and reset the
+        # once-per-attempt guard so two alerts in a row both get through.
+        payload = msg.get("payload", {}) or {}
+        self._call_payload = dict(payload)
+        self._fallback_sent = False
+
+        if not self._calls_enabled():
+            await self._refuse_call_start(
+                "Telegram calling is disabled (TelegramCallEnabled=false).",
+                "calls_disabled",
+            )
+            return
+
         # Must have a resolved target
         if not self._target_user_id or self._target_access_hash is None:
-            self._emit(type="telegram_call_result", ok=False,
-                       message="No call target resolved. Use telegram_resolve_target first.")
+            await self._refuse_call_start(
+                "No call target resolved. Use telegram_resolve_target first.",
+                "no_target",
+            )
             return
 
         api_id, api_hash, _ = self._creds_from_config()
         if not api_id or not api_hash:
-            self._emit(type="telegram_call_result", ok=False,
-                       message="Telegram api_id/api_hash not configured.")
+            await self._refuse_call_start(
+                "Telegram api_id/api_hash not configured.", "no_credentials")
             return
 
         session = load_session()
         if not session:
-            self._emit(type="telegram_call_result", ok=False,
-                       message="No saved Telegram session. Login first.")
+            await self._refuse_call_start(
+                "No saved Telegram session. Login first.", "no_session")
             return
-
-        # Extract payload (notification content for fallback)
-        payload = msg.get("payload", {})
-        if payload:
-            self._call_payload = payload
-        else:
-            self._call_payload = {}
 
         # Store audio queues for the call task
         self._gemini_mic_queue = mic_queue
@@ -731,6 +884,7 @@ class TelegramController:
         self._call_answered_ts = None
         self._call_first_speech_ts = None
         self._call_first_real_speech_ts = None  # Track first NON-tone speech from remote
+        self._fallback_sent = False
 
         self._call_phase = "ringing"
         self._call_task = asyncio.current_task()
@@ -806,13 +960,13 @@ class TelegramController:
 
             await client.connect()
             if not await client.is_user_authorized():
-                await self._call_emit_state("error", "Session not authorized")
+                await self._fail_call(client, "Session not authorized", "not_authorized")
                 return
 
             # 1. create_p2p_call
             input_user = target_peer or await client.get_input_entity(target)
             if not isinstance(input_user, t.InputPeerUser):
-                await self._call_emit_state("error", "Target is not a user")
+                await self._fail_call(client, "Target is not a user", "invalid_target")
                 return
             user_id = input_user.user_id
             await wrtc.create_p2p_call(user_id)
@@ -842,7 +996,11 @@ class TelegramController:
             ))
             waiting = result.phone_call
             if not isinstance(waiting, t.PhoneCallWaiting):
-                await self._call_emit_state("error", f"Unexpected RequestCall result: {type(waiting).__name__}")
+                await self._fail_call(
+                    client,
+                    f"Unexpected RequestCall result: {type(waiting).__name__}",
+                    "request_failed",
+                )
                 return
             call_id = waiting.id
             call_access_hash = waiting.access_hash
@@ -895,7 +1053,11 @@ class TelegramController:
             ))
             phone_call = conn.phone_call
             if not isinstance(phone_call, t.PhoneCall):
-                await self._call_emit_state("error", f"ConfirmCall failed: {type(phone_call).__name__}")
+                await self._fail_call(
+                    client,
+                    f"ConfirmCall failed: {type(phone_call).__name__}",
+                    "connect_failed",
+                )
                 return
 
             call_id = phone_call.id
@@ -1031,7 +1193,11 @@ class TelegramController:
             await self._call_emit_state("ended", "Call cancelled")
             # Don't send fallback on explicit cancel
         except Exception as e:
-            await self._call_emit_state("error", f"Call failed: {type(e).__name__}: {_redact(str(e))}")
+            await self._fail_call(
+                client,
+                f"Call failed: {type(e).__name__}: {_redact(str(e))}",
+                "connect_failed",
+            )
         finally:
             if monitor_task is not None and not monitor_task.done():
                 monitor_task.cancel()
@@ -1048,6 +1214,7 @@ class TelegramController:
             self._gemini_mic_queue = None
             self._gemini_audio_out_queue = None
             self._call_payload = {}
+            self._fallback_sent = False
             self._call_phase = "idle"
             if hasattr(self, "_call_task"):
                 self._call_task = None
@@ -1100,6 +1267,13 @@ class TelegramController:
         if not self._fallbacks_enabled():
             return
 
+        # One alert must produce at most one text: a call can fail in several
+        # places on its way down (setup error, then teardown error), and each
+        # one would otherwise send its own copy.
+        if self._fallback_sent:
+            return
+        self._fallback_sent = True
+
         # Get fallback threshold (default 5 seconds)
         fallback_threshold = 5
         try:
@@ -1119,19 +1293,22 @@ class TelegramController:
             pass
 
         answered = self._call_answered_ts is not None
-        duration = time.time() - (self._call_answered_ts or self._call_start_ts)
+        duration = time.time() - (self._call_answered_ts or self._call_start_ts or time.time())
         spoke = self._call_first_speech_ts is not None
 
         # Conditions for fallback:
-        # 1. Never answered (ring timeout or declined)
+        # 1. Never reached the owner (ring timeout, declined, or a failure
+        #    before the phone rang at all)
         # 2. Answered but hung up quickly (< threshold AND no real speech)
         should_fallback = False
         fallback_reason = ""
-        
+
         if not answered:
-            # Ring timeout or declined
             should_fallback = True
-            fallback_reason = f"call {reason} (not answered)"
+            if reason in ("declined", "timeout"):
+                fallback_reason = f"call {reason} (not answered)"
+            else:
+                fallback_reason = f"could not call you ({_FAILURE_REASON_TEXT.get(reason, reason)})"
         elif duration < fallback_threshold and not spoke:
             # Answered but hung up immediately without real conversation
             should_fallback = True
