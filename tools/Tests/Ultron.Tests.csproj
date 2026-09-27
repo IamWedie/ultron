@@ -32,6 +32,7 @@
     <Compile Include="..\..\Services\Tools\Files\PathPolicy.cs" />
     <Compile Include="..\..\Services\Tools\Files\FileToolService.cs" />
     <Compile Include="..\..\Services\Processes\IProcessLauncher.cs" />
+    <Compile Include="..\..\Services\Processes\CommandRunner.cs" />
     <Compile Include="..\..\Services\Apps\AppResolver.cs" />
     <Compile Include="..\..\Services\Tools\Apps\AppToolService.cs" />
   </ItemGroup>
