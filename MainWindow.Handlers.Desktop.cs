@@ -27,7 +27,7 @@ namespace Ultron;
 
 public sealed partial class MainWindow
 {
-    private async Task<string> HandleDesktopControl(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleDesktopControl(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var x = TryIntArg(args, "x");
@@ -38,42 +38,43 @@ public sealed partial class MainWindow
             switch (action.ToLowerInvariant())
             {
                 case "screenshot":
-                    return await RunAsync("snippingtool", "/clip");
+                    return await RunAsyncTool("snippingtool", "/clip");
 
                 case "move_mouse":
                 case "mouse_move":
                     MoveMouse(x, y);
-                    return $"Moved mouse to ({x ?? CurrentX()}, {y ?? CurrentY()}).";
+                    return ToolResult.Ok($"Moved mouse to ({x ?? CurrentX()}, {y ?? CurrentY()}).");
 
                 case "click":
                     ClickAt(x, y);
-                    return $"Clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).";
+                    return ToolResult.Ok($"Clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).");
 
                 case "double_click":
                     ClickAt(x, y, doubleClick: true);
-                    return $"Double-clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).";
+                    return ToolResult.Ok($"Double-clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).");
 
                 case "right_click":
                     RightClickAt(x, y);
-                    return $"Right-clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).";
+                    return ToolResult.Ok($"Right-clicked at ({x ?? CurrentX()}, {y ?? CurrentY()}).");
 
                 case "scroll":
                     Scroll(amount ?? 1);
-                    return $"Scrolled {(amount ?? 1)} notch(es).";
+                    return ToolResult.Ok($"Scrolled {(amount ?? 1)} notch(es).");
 
                 case "focus_window":
                     MoveMouse(x, y);
-                    return "Brought the active window to the foreground.";
+                    return ToolResult.Ok("Brought the active window to the foreground.");
             }
         }
         catch (Exception e)
         {
-            return $"Desktop action '{action}' failed: {e.Message}";
+            return ToolResult.Fail($"Desktop action '{action}' failed: {e.Message}");
         }
-        return $"Desktop action '{action}' not yet implemented.";
+        return ToolResult.Unsupported(
+            $"Desktop action '{action}' is not implemented. Supported: screenshot, move_mouse, click, double_click, right_click, scroll, focus_window.");
     }
 
-    private string HandleWindowManage(Dictionary<string, object> args)
+    private ToolResult HandleWindowManage(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString()?.ToLowerInvariant() ?? "";
         var app = args.GetValueOrDefault("app")?.ToString() ?? "";
@@ -91,28 +92,28 @@ public sealed partial class MainWindow
                     else if (!string.IsNullOrWhiteSpace(title)) h = Native.FindWindowByTitle(title);
                     else h = IntPtr.Zero;
                     if (h == IntPtr.Zero)
-                        return $"No window found for '{app}{(!string.IsNullOrEmpty(title) ? title : "")}'.";
+                        return ToolResult.NotFound($"No window found for '{app}{(!string.IsNullOrEmpty(title) ? title : "")}'.");
                     Native.FocusWindow(h);
-                    return $"Focused \"{Native.WindowTitle(h)}\".";
+                    return ToolResult.Ok($"Focused \"{Native.WindowTitle(h)}\".");
                 }
 
                 case "minimize":
                 {
                     var fg = Native.GetForegroundWindow();
-                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_MINIMIZE); return "Minimized the active window."; }
-                    return "Nothing to minimize.";
+                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_MINIMIZE); return ToolResult.Ok("Minimized the active window."); }
+                    return ToolResult.Fail("Nothing to minimize: no other window is in the foreground.");
                 }
                 case "maximize":
                 {
                     var fg = Native.GetForegroundWindow();
-                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_MAXIMIZE); return "Maximized the active window."; }
-                    return "Nothing to maximize.";
+                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_MAXIMIZE); return ToolResult.Ok("Maximized the active window."); }
+                    return ToolResult.Fail("Nothing to maximize: no other window is in the foreground.");
                 }
                 case "restore":
                 {
                     var fg = Native.GetForegroundWindow();
-                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_RESTORE); return "Restored the active window."; }
-                    return "Nothing to restore.";
+                    if (fg != IntPtr.Zero && fg != _selfHwnd) { Native.ShowWindow(fg, Native.SW_RESTORE); return ToolResult.Ok("Restored the active window."); }
+                    return ToolResult.Fail("Nothing to restore: no other window is in the foreground.");
                 }
                 case "close":
                 case "close_window":
@@ -123,7 +124,7 @@ public sealed partial class MainWindow
                         KeyCodeInput(0x73, true, unicode: false),
                         KeyCodeInput(0x12, true, unicode: false),
                     });
-                    return "Sent Alt+F4 — closing the active window.";
+                    return ToolResult.Ok("Sent Alt+F4 — closing the active window.");
                 case "next_window":
                     SendInputBatch(new List<NativeInput>
                     {
@@ -132,7 +133,7 @@ public sealed partial class MainWindow
                         KeyCodeInput(0x09, true, unicode: false),
                         KeyCodeInput(0x12, true, unicode: false),
                     });
-                    return "Switched to the next window.";
+                    return ToolResult.Ok("Switched to the next window.");
                 case "show_desktop":
                     SendInputBatch(new List<NativeInput>
                     {
@@ -141,16 +142,16 @@ public sealed partial class MainWindow
                         KeyCodeInput(0x44, true, unicode: false),
                         KeyCodeInput(0x5B, true, unicode: false),
                     });
-                    return "Showed the desktop.";
+                    return ToolResult.Ok("Showed the desktop.");
                 case "list":
                 case "list_windows":
-                    return Native.ListWindows();
+                    return ToolResult.Ok(Native.ListWindows());
             }
-            return $"Window action '{action}' not supported. Try: focus_app, minimize, maximize, restore, close, next_window, show_desktop, list_windows.";
+            return ToolResult.Unsupported($"Window action '{action}' not supported. Try: focus_app, minimize, maximize, restore, close, next_window, show_desktop, list_windows.");
         }
         catch (Exception e)
         {
-            return $"Window action '{action}' failed: {e.Message}";
+            return ToolResult.Fail($"Window action '{action}' failed: {e.Message}");
         }
     }
 

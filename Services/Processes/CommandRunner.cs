@@ -35,6 +35,14 @@ public sealed record CommandResult(
             ? $"Exit code: {ExitCode}. {body}"
             : $"Failed: {command} exited with code {ExitCode}. {body}";
     }
+
+    /// <summary>
+    /// <see cref="Describe"/> keeps the wording but throws the outcome away, so a
+    /// handler that returned it reached the model as a success however the process
+    /// had actually exited. This keeps both.
+    /// </summary>
+    public ToolResult ToResult(string command) =>
+        Succeeded ? ToolResult.Ok(Describe(command)) : ToolResult.Fail(Describe(command));
 }
 
 /// <summary>

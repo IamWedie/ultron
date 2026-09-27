@@ -125,11 +125,12 @@ public sealed partial class MainWindow
 
     private string UndoHistory() => _undo.History();
 
-    private string HandleUndo()
-    {
-        var result = _undo.Undo();
-        Dbg($"Undo: {result}");
-        return result;
-    }
+    /// <summary>
+    /// UndoLedger answers with a sentence, and that sentence is either a reversal
+    /// or a refusal - "Nothing to undo." when the ledger is empty, or "Undo of X
+    /// failed: ..." when the reversal threw. Reporting either as a success told
+    /// the user the change had been rolled back when it had not.
+    /// </summary>
+    private ToolResult HandleUndo() => _undo.UndoResult();
 
 }

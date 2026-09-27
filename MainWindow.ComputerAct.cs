@@ -109,7 +109,10 @@ public sealed partial class MainWindow
             case "press_key":
                 var keys = action.TryGetProperty("keys", out var ke) ? ke.GetString() ?? "" : "";
                 var args = new Dictionary<string, object> { ["keys"] = keys };
-                return HandlePressKey(args);
+                // This legacy path answers the backend with a sentence, not a
+                // ToolResult, so only the message survives. The router's
+                // press_key handler reports the outcome properly.
+                return HandlePressKey(args).Message;
             default:
                 return $"Unknown computer action type '{type}'.";
         }

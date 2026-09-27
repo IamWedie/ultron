@@ -27,10 +27,10 @@ namespace Ultron;
 
 public sealed partial class MainWindow
 {
-    private async Task<string> HandleWebSearchAsync(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleWebSearchAsync(Dictionary<string, object> args)
     {
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(query)) return "No query supplied.";
+        if (string.IsNullOrEmpty(query)) return ToolResult.InvalidArguments("web_search needs a non-empty 'query' argument.");
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
@@ -52,27 +52,27 @@ public sealed partial class MainWindow
                 idx = linkEnd + 4;
             }
             return results.Count > 0
-                ? $"Search results for \"{query}\":\n" + string.Join("\n", results.Select((r, i) => $"{i + 1}. {r}"))
-                : $"No results found for \"{query}\".";
+                ? ToolResult.Ok($"Search results for \"{query}\":\n" + string.Join("\n", results.Select((r, i) => $"{i + 1}. {r}")))
+                : ToolResult.NotFound($"No results found for \"{query}\".");
         }
-        catch (Exception ex) { return $"Search failed: {ex.Message}"; }
+        catch (Exception ex) { return ToolResult.Fail($"Search failed: {ex.Message}"); }
     }
 
-    private async Task<string> HandleWeatherAsync(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleWeatherAsync(Dictionary<string, object> args)
     {
         var city = args.GetValueOrDefault("city")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(city)) return "No city supplied.";
+        if (string.IsNullOrEmpty(city)) return ToolResult.InvalidArguments("weather_report needs a non-empty 'city' argument.");
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
             var url = $"https://wttr.in/{Uri.EscapeDataString(city)}?format=3";
             var result = await http.GetStringAsync(url);
-            return result.Trim();
+            return ToolResult.Ok(result.Trim());
         }
-        catch (Exception ex) { return $"Weather lookup failed: {ex.Message}"; }
+        catch (Exception ex) { return ToolResult.Fail($"Weather lookup failed: {ex.Message}"); }
     }
 
-    private string HandleReminder(Dictionary<string, object> args)
+    private ToolResult HandleReminder(Dictionary<string, object> args)
     {
         var date = args.GetValueOrDefault("date")?.ToString() ?? "";
         var time = args.GetValueOrDefault("time")?.ToString() ?? "";
@@ -84,10 +84,13 @@ public sealed partial class MainWindow
             try { await _memory.LogAsync("system", logEntry); }
             catch { }
         });
-        return $"Reminder noted: {date} {time} — {message}. (Reminder notifications not yet implemented; logged locally.)";
+        // Nothing will fire at the requested time. Reporting that as a success
+        // meant the model promised the user a reminder that never arrived.
+        return ToolResult.Unsupported(
+            $"Reminder NOT scheduled. It was only logged: {date} {time} — {message}. Scheduled reminders are not implemented; tell the user nothing will fire.");
     }
 
-    private async Task<string> HandleBrowserControlAsync(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleBrowserControlAsync(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var url = args.GetValueOrDefault("url")?.ToString() ?? "";
@@ -96,14 +99,14 @@ public sealed partial class MainWindow
         {
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
                 uri.Scheme is not ("http" or "https"))
-                return "Only absolute http or https URLs are allowed.";
+                return ToolResult.InvalidArguments("Only absolute http or https URLs are allowed.");
             try
             {
                 var psi = new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true };
                 System.Diagnostics.Process.Start(psi);
-                return $"Opened {uri.AbsoluteUri}";
+                return ToolResult.Ok($"Opened {uri.AbsoluteUri}");
             }
-            catch (Exception ex) { return $"Failed: {ex.Message}"; }
+            catch (Exception ex) { return ToolResult.Fail($"Failed to open {uri.AbsoluteUri}: {ex.Message}"); }
         }
         if (action == "search" && !string.IsNullOrEmpty(query))
         {
@@ -112,11 +115,12 @@ public sealed partial class MainWindow
             {
                 var psi = new System.Diagnostics.ProcessStartInfo(searchUrl) { UseShellExecute = true };
                 System.Diagnostics.Process.Start(psi);
-                return $"Searched for \"{query}\"";
+                return ToolResult.Ok($"Searched for \"{query}\"");
             }
-            catch (Exception ex) { return $"Failed: {ex.Message}"; }
+            catch (Exception ex) { return ToolResult.Fail($"Search failed: {ex.Message}"); }
         }
-        return "Browser control: action not recognized or missing parameters.";
+        return ToolResult.Unsupported(
+            $"Browser control action '{action}' not recognised or missing parameters. Supported: open_url (with 'url'), search (with 'query').");
     }
 
 }

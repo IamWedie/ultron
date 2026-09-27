@@ -27,13 +27,13 @@ namespace Ultron;
 
 public sealed partial class MainWindow
 {
-    private string HandleSaveMemory(Dictionary<string, object> args)
+    private ToolResult HandleSaveMemory(Dictionary<string, object> args)
     {
         var category = args.GetValueOrDefault("category")?.ToString() ?? "notes";
         var key = args.GetValueOrDefault("key")?.ToString() ?? "";
         var value = args.GetValueOrDefault("value")?.ToString() ?? "";
         if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
-            return "Missing key or value.";
+            return ToolResult.InvalidArguments("save_memory needs both a 'key' and a 'value'.");
         
         // Store in SQLite MemoryStore as a fact with topic = category
         var factText = $"[{category}] {key}: {value}";
@@ -50,10 +50,10 @@ public sealed partial class MainWindow
         });
         
         if (_memCache.Count > 0) RefreshMemory();
-        return $"Remembered [{category}] {key}: {value}";
+        return ToolResult.Ok($"Remembered [{category}] {key}: {value}");
     }
 
-    private string HandleRecallMemory(Dictionary<string, object> args)
+    private ToolResult HandleRecallMemory(Dictionary<string, object> args)
     {
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
         
@@ -91,7 +91,11 @@ public sealed partial class MainWindow
                 results.Add($"[conv] {c.Ts} {c.Role}: {c.Text}");
         }
         
-        return results.Count > 0 ? string.Join("\n", results.Take(8)) : "Nothing found in memory.";
+        // An empty recall is a miss, not a success: reporting it as Ok let the model
+        // tell the user what it remembered when it had recalled nothing.
+        return results.Count > 0
+            ? ToolResult.Ok(string.Join("\n", results.Take(8)))
+            : ToolResult.NotFound($"Nothing found in memory for '{query}'.");
     }
 
 }

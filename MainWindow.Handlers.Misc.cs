@@ -27,17 +27,20 @@ namespace Ultron;
 
 public sealed partial class MainWindow
 {
-    private string HandleCodeHelper(Dictionary<string, object> args)
+    private ToolResult HandleCodeHelper(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var code = args.GetValueOrDefault("code")?.ToString() ?? "";
         var instruction = args.GetValueOrDefault("instruction")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(code)) return "No code supplied.";
+        if (string.IsNullOrEmpty(code)) return ToolResult.InvalidArguments("code_helper needs a non-empty 'code' argument.");
         // This tool is a placeholder - code analysis is done by the AI model directly.
-        return $"Code helper ({action}): This tool is not yet implemented. The AI can analyze code directly in conversation.";
+        // It reported itself as a success, so the model told the user the analysis
+        // was done when no code had been touched at all.
+        return ToolResult.Unsupported(
+            $"Code helper ({action}) is not implemented. The AI can analyze code directly in conversation - send the code in your message instead of calling this tool.");
     }
 
-    private string HandleSendMessage(Dictionary<string, object> args)
+    private ToolResult HandleSendMessage(Dictionary<string, object> args)
     {
         var receiver = args.GetValueOrDefault("receiver")?.ToString() ?? "";
         var text = args.GetValueOrDefault("message_text")?.ToString() ?? "";
@@ -49,7 +52,10 @@ public sealed partial class MainWindow
             try { await _memory.LogAsync("system", logEntry); }
             catch { }
         });
-        return $"Message logged for {receiver} via {platform}: \"{text}\". (Sending requires phone_* ADB tools; not yet implemented via this tool.)";
+        // The message is logged, not sent. Saying so as a success let the model
+        // confirm delivery of a text that never left the machine.
+        return ToolResult.Unsupported(
+            $"Message NOT sent. It was only logged: \"{text}\" for {receiver} via {platform}. Sending requires the phone_* ADB tools. Tell the user the message was not delivered.");
     }
 
     private string HandleSetAway(Dictionary<string, object> args)
@@ -84,7 +90,7 @@ public sealed partial class MainWindow
         }
     }
 
-    private string HandleYouTubeVideo(Dictionary<string, object> args)
+    private ToolResult HandleYouTubeVideo(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var query = args.GetValueOrDefault("query")?.ToString() ?? "";
@@ -95,11 +101,12 @@ public sealed partial class MainWindow
             {
                 var psi = new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true };
                 System.Diagnostics.Process.Start(psi);
-                return $"Searching YouTube for \"{query}\"";
+                return ToolResult.Ok($"Searching YouTube for \"{query}\"");
             }
-            catch (Exception ex) { return $"Failed: {ex.Message}"; }
+            catch (Exception ex) { return ToolResult.Fail($"Failed to open YouTube: {ex.Message}"); }
         }
-        return "YouTube action not recognized.";
+        return ToolResult.Unsupported(
+            $"YouTube action '{action}' not recognised. Supported: search (with a 'query').");
     }
 
 }

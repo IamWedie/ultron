@@ -27,14 +27,14 @@ namespace Ultron;
 
 public sealed partial class MainWindow
 {
-    private async Task<string> HandleTypeTextAsync(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleTypeTextAsync(Dictionary<string, object> args)
     {
         var text = args.GetValueOrDefault("text")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(text)) return "No text supplied.";
+        if (string.IsNullOrEmpty(text)) return ToolResult.InvalidArguments("type_text needs a non-empty 'text' argument.");
         // Resolve where the user actually wants the text typed.
         var target = ResolveTypeTarget();
         if (target == IntPtr.Zero)
-            return "No active window found to type into — click a window first, then try again.";
+            return ToolResult.Fail("No active window found to type into — click a window first, then try again.");
         try
         {
             Native.FocusWindow(target);
@@ -58,9 +58,9 @@ public sealed partial class MainWindow
                 }
                 catch (Exception ex) { return $"Ctrl+Z failed: {ex.Message}"; }
             });
-            return $"Typed: {text}" + (string.IsNullOrEmpty(targetName) ? "" : $" (into \"{targetName}\")");
+            return ToolResult.Ok($"Typed: {text}" + (string.IsNullOrEmpty(targetName) ? "" : $" (into \"{targetName}\")"));
         }
-        catch (Exception ex) { return $"Could not type: {ex.Message}"; }
+        catch (Exception ex) { return ToolResult.Fail($"Could not type: {ex.Message}"); }
     }
 
     private static readonly Dictionary<string, ushort> _vkMap = new(StringComparer.OrdinalIgnoreCase)
@@ -108,17 +108,17 @@ public sealed partial class MainWindow
         return 0;
     }
 
-    private string HandlePressKey(Dictionary<string, object> args)
+    private ToolResult HandlePressKey(Dictionary<string, object> args)
     {
         var spec = args.GetValueOrDefault("keys")?.ToString()
                    ?? args.GetValueOrDefault("key")?.ToString() ?? "";
         var repeat = args.GetValueOrDefault("repeat") is JsonElement je && je.TryGetInt32(out var rr) ? rr : 1;
-        if (string.IsNullOrEmpty(spec)) return "No key given.";
+        if (string.IsNullOrEmpty(spec)) return ToolResult.InvalidArguments("press_key needs a 'keys' argument, e.g. \"ctrl+s\".");
         var parts = spec.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length == 0) return "No key given.";
+        if (parts.Length == 0) return ToolResult.InvalidArguments("press_key needs a 'keys' argument, e.g. \"ctrl+s\".");
         var codes = parts.Select(LookupVk).ToList();
         var bad = parts.Zip(codes, (p, c) => c == 0 ? p : null).FirstOrDefault(n => n != null);
-        if (bad != null) return $"Unrecognized key: {bad}. Supported: letters, digits, enter, tab, backspace, delete, escape, arrows, f1-f12, ctrl/alt/shift/win combos.";
+        if (bad != null) return ToolResult.InvalidArguments($"Unrecognized key: {bad}. Supported: letters, digits, enter, tab, backspace, delete, escape, arrows, f1-f12, ctrl/alt/shift/win combos.");
         if (repeat < 1) repeat = 1;
         if (repeat > 50) repeat = 50;
         try
@@ -140,9 +140,9 @@ public sealed partial class MainWindow
                 // enter) — otherwise just report the press for the transcript.
                 return $"Pressed {spec} (repeat {(repeat > 1 ? repeat : 1)}).";
             });
-            return $"Pressed {spec}" + (repeat > 1 ? $" x{repeat}" : "") + ".";
+            return ToolResult.Ok($"Pressed {spec}" + (repeat > 1 ? $" x{repeat}" : "") + ".");
         }
-        catch (Exception ex) { return $"Could not press {spec}: {ex.Message}"; }
+        catch (Exception ex) { return ToolResult.Fail($"Could not press {spec}: {ex.Message}"); }
     }
 
     private void TrackActiveWindow()

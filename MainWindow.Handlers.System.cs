@@ -39,7 +39,7 @@ public sealed partial class MainWindow
         return $"Memory: {mem} MB, Threads across system: {totalThreads}, Uptime: {DateTime.Now - proc.StartTime:hh\\:mm\\:ss}";
     }
 
-    private async Task<string> HandleComputerSettings(Dictionary<string, object> args)
+    private async Task<ToolResult> HandleComputerSettings(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         switch (action.ToLowerInvariant())
@@ -50,19 +50,19 @@ public sealed partial class MainWindow
             case "unmute":
             {
                 var before = SystemVolume.Get();
-                string result;
+                (string File, string Args) command;
                 switch (action.ToLowerInvariant())
                 {
-                    case "volume_up": result = await RunAsync("nircmd.exe", "changesysvolume 2000"); break;
-                    case "volume_down": result = await RunAsync("nircmd.exe", "changesysvolume -2000"); break;
-                    case "mute": result = await RunAsync("nircmd.exe", "mutesysvolume 1"); break;
-                    default: result = await RunAsync("nircmd.exe", "mutesysvolume 0"); break;
+                    case "volume_up": command = ("nircmd.exe", "changesysvolume 2000"); break;
+                    case "volume_down": command = ("nircmd.exe", "changesysvolume -2000"); break;
+                    case "mute": command = ("nircmd.exe", "mutesysvolume 1"); break;
+                    default: command = ("nircmd.exe", "mutesysvolume 0"); break;
                 }
                 // Undo restores the EXACT prior volume + mute state. If we could
                 // not read the value, register nothing — undoing a guess is worse.
                 if (before.volume >= 0f)
                 {
-var (v, m) = before;
+                    var (v, m) = before;
                     PushUndo($"computer_settings({action})", () =>
                     {
                         SystemVolume.Set(v, m);
@@ -71,21 +71,25 @@ var (v, m) = before;
                         return $"Restored volume to {pct}%{suffix}.";
                     });
                 }
-                return result;
+                return await RunAsyncTool(command.File, command.Args);
             }
-            case "shutdown": return await RunAsync("shutdown", "/s /t 30");
-            case "restart": return await RunAsync("shutdown", "/r /t 30");
-            case "sleep": return await RunAsync("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0");
-            case "lock": return await RunAsync("rundll32.exe", "user32.dll,LockWorkStation");
-            case "screenshot": return await RunAsync("snippingtool", "/clip");
-            default: return $"Unknown action: {action}";
+            case "shutdown": return await RunAsyncTool("shutdown", "/s /t 30");
+            case "restart": return await RunAsyncTool("shutdown", "/r /t 30");
+            case "sleep": return await RunAsyncTool("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0");
+            case "lock": return await RunAsyncTool("rundll32.exe", "user32.dll,LockWorkStation");
+            case "screenshot": return await RunAsyncTool("snippingtool", "/clip");
+            default:
+                return ToolResult.Unsupported(
+                    $"computer_settings action '{action}' is not recognised. Supported: volume_up, volume_down, mute, unmute, shutdown, restart, sleep, lock, screenshot.");
         }
     }
 
-    private async Task<string> RunAsync(string file, string args)
-    {
-        var result = await _commandRunner.RunAsync(file, args);
-        return result.Describe(file);
-    }
+    /// <summary>
+    /// Runs a console tool and keeps its real outcome. A failed nircmd or a
+    /// refused shutdown used to reach the model as a success, because the
+    /// runner's description was returned as if it were always a good result.
+    /// </summary>
+    private async Task<ToolResult> RunAsyncTool(string file, string args) =>
+        (await _commandRunner.RunAsync(file, args)).ToResult(file);
 
 }

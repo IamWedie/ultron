@@ -34,23 +34,42 @@ public sealed class UndoLedger
     }
 
     /// <summary>Reverses the most recent action. Never throws.</summary>
-    public string Undo()
+    public string Undo() => UndoCore().Message;
+
+    /// <summary>
+    /// The same reversal as <see cref="Undo"/>, with the outcome classified.
+    /// <see cref="Undo"/> can only answer with a sentence, so the <c>undo</c> tool
+    /// had to guess from the wording whether the ledger was empty or a reversal
+    /// had thrown; both read to the model as a success.
+    /// </summary>
+    public ToolResult UndoResult()
+    {
+        var outcome = UndoCore();
+        return outcome.Error switch
+        {
+            ToolError.NotFound => ToolResult.NotFound(outcome.Message),
+            ToolError.Failed => ToolResult.Fail(outcome.Message),
+            _ => ToolResult.Ok(outcome.Message),
+        };
+    }
+
+    private (string Message, ToolError Error) UndoCore()
     {
         (string Description, Func<string> Undo) item;
         lock (_gate)
         {
-            if (_entries.Count == 0) return "Nothing to undo.";
+            if (_entries.Count == 0) return ("Nothing to undo.", ToolError.NotFound);
             item = _entries[^1];
             _entries.RemoveAt(_entries.Count - 1);
         }
 
         try
         {
-            return $"Undid {item.Description}. {item.Undo()}";
+            return ($"Undid {item.Description}. {item.Undo()}", ToolError.None);
         }
         catch (Exception ex)
         {
-            return $"Undo of {item.Description} failed: {ex.Message}";
+            return ($"Undo of {item.Description} failed: {ex.Message}", ToolError.Failed);
         }
     }
 

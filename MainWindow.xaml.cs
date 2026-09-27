@@ -360,12 +360,22 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     {
         // Legacy handlers still take Dictionary<string, object>. ToLegacyArgs is
         // deleted in STEP 11, once every handler owns its typed arguments.
-        IToolHandler Sync(string name, Func<Dictionary<string, object>, string> run) =>
-            new DelegateToolHandler(name, (toolCall, _) => ToolResult.Ok(run(ToLegacyArgs(toolCall.Arguments))));
+        //
+        // Sync/Async used to wrap whatever the handler returned in ToolResult.Ok,
+        // so a handler that returned "Unrecognized key: X" or "this tool is not
+        // implemented" reached the model as a success and the model would report
+        // the failure back to the user as done. These adapters no longer wrap:
+        // a handler that can fail returns its own ToolResult.
+        IToolHandler Sync(string name, Func<Dictionary<string, object>, ToolResult> run) =>
+            new DelegateToolHandler(name, (toolCall, _) => run(ToLegacyArgs(toolCall.Arguments)));
 
-        IToolHandler Async(string name, Func<Dictionary<string, object>, Task<string>> run) =>
-            new DelegateToolHandler(name, async (toolCall, _) =>
-                ToolResult.Ok(await run(ToLegacyArgs(toolCall.Arguments))));
+        IToolHandler Async(string name, Func<Dictionary<string, object>, Task<ToolResult>> run) =>
+            new DelegateToolHandler(name, (toolCall, _) => run(ToLegacyArgs(toolCall.Arguments)));
+
+        // For the few handlers with no failure path at all, where the message is
+        // always a true success. Anything that can fail must use Sync/Async.
+        IToolHandler SyncOk(string name, Func<Dictionary<string, object>, string> run) =>
+            new DelegateToolHandler(name, (toolCall, _) => ToolResult.Ok(run(ToLegacyArgs(toolCall.Arguments))));
 
         IToolHandler Passthrough(string name, string message) =>
             new DelegateToolHandler(name, (_, _) => ToolResult.Ok(message));
@@ -382,12 +392,12 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 Async("desktop_control", HandleDesktopControl),
                 Sync("window_manage", HandleWindowManage),
                 // system
-                Sync("system_status", _ => HandleSystemStatus()),
+                SyncOk("system_status", _ => HandleSystemStatus()),
                 // apps
                 new AppToolService(new AppResolver(), new SystemProcessLauncher(), this, _undo),
                 Async("computer_settings", HandleComputerSettings),
-                Sync("set_away_mode", HandleSetAway),
-                Sync("shutdown_jarvis", _ => Shutdown()),
+                SyncOk("set_away_mode", HandleSetAway),
+                SyncOk("shutdown_jarvis", _ => Shutdown()),
                 // web / media
                 Async("web_search", HandleWebSearchAsync),
                 Async("weather_report", HandleWeatherAsync),
