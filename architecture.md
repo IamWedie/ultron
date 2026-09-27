@@ -62,18 +62,19 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
 | `backend/memory_store.json` | Persistent memory (user preferences, facts, people) |
 | `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
 | `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
-| `Services/SettingsDialogService.cs` | Settings dialog UI logic (extracted from MainWindow) |
-| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
-| `Services/MemoryPanelService.cs` | Memory panel UI logic (extracted from MainWindow) |
-| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
-| `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
-| `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
-| `Services/SettingsDialogService.cs` | Settings dialog UI logic (extracted from MainWindow) |
-| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
-| `Services/MemoryPanelService.cs` | Memory panel UI logic (extracted from MainWindow) |
-| `Services/TelegramCallOverlayService.cs` | Telegram call overlay UI (extracted from MainWindow) |
-| `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
-| `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
+| `MainWindow.Calls.cs` | Telegram call overlay UI, call state, duration tick, hangup |
+| `MainWindow.xaml.cs` (`OpenSettingsAsync`) | Settings dialog UI, including the Telegram login panel |
+
+`MainWindow` is split into partial classes by concern (`MainWindow.Handlers.*`,
+`MainWindow.ToolRouting.cs`, `MainWindow.Calls.cs`, and so on); the window stays
+the composition root and is the only place that knows about the UI.
+
+Two files that earlier appeared here, `Services/SettingsDialogService.cs` and
+`Services/TelegramCallOverlayService.cs`, were unreachable duplicates of code
+that lives on the window. Both were deleted rather than given narrow interfaces:
+neither was ever constructed, so the interfaces would have wrapped code that
+never ran. The same table also listed a `Services/MemoryPanelService.cs` that
+does not exist.
 
 ### 1.4 Data Flow Summary
 ```
