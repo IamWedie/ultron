@@ -22,7 +22,6 @@ using System.Buffers;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
-using QRCoder;
 
 namespace Ultron;
 
@@ -98,7 +97,6 @@ public sealed partial class MainWindow
                     ResumeLocalMic();
                     break;
             }
-            _dashboard?.PushStatus(state, _awakeInGemini);
         });
     }
 
@@ -128,7 +126,6 @@ public sealed partial class MainWindow
         DispatcherQueue.TryEnqueue(() =>
         {
             AddMessage(role == "user" ? "user" : "ultron", text);
-            _dashboard?.PushTranscript(role == "user" ? "user" : "ultron", text);
             if (role == "user")
             {
                 _lastInteraction = DateTime.UtcNow;

@@ -43,11 +43,6 @@ public sealed class AppSettings
     public int EngagedTimeoutSeconds { get; set; } = 120;
     public int WakeListeningTimeoutSeconds { get; set; } = 10;
 
-    // LAN web deck: live read-only transcript + voice status, guarded by a random
-    // session token baked into the QR. Default off — conversations are sensitive.
-    public bool WebDashboardEnabled { get; set; } = false;
-    public int WebDashboardPort { get; set; } = 8123;
-
     // Privacy: conversations are logged to memory.db only while this is true.
     public bool MemoryLogging { get; set; } = true;
 

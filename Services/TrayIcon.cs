@@ -18,7 +18,7 @@ public sealed class TrayIcon : IDisposable
     private const uint MfString = 0x0, MfSeparator = 0x800;
     private const int TpmRightButton = 0x2, TpmReturnCmd = 0x100;
 
-    private const int CmdShow = 1, CmdAwake = 2, CmdMute = 3, CmdPtt = 4, CmdDeck = 6, CmdQuit = 5;
+    private const int CmdShow = 1, CmdAwake = 2, CmdMute = 3, CmdPtt = 4, CmdQuit = 5;
 
     /// <summary>Fixed identity for the notification icon so the shell reuses a
     /// single slot across restarts (no stale ghosts pointing at dead hwnds).</summary>
@@ -35,7 +35,6 @@ public sealed class TrayIcon : IDisposable
     public event Action? ToggleAwakeRequested;
     public event Action? ToggleMuteRequested;
     public event Action? PushToTalkRequested;
-    public event Action? DashboardRequested;
     public event Action? QuitRequested;
     public event Action<int>? HotKeyPressed;
 
@@ -85,7 +84,6 @@ public sealed class TrayIcon : IDisposable
         AppendMenuW(menu, MfString, CmdAwake, "Wake Toggle");
         AppendMenuW(menu, MfString, CmdMute, "Mute Mic");
         AppendMenuW(menu, MfString, CmdPtt, "Push-to-Talk");
-        AppendMenuW(menu, MfString, CmdDeck, "Web Deck (QR code)…");
         AppendMenuW(menu, MfSeparator, IntPtr.Zero, null);
         AppendMenuW(menu, MfString, CmdQuit, "Quit");
 
@@ -98,7 +96,6 @@ public sealed class TrayIcon : IDisposable
             case CmdAwake: ToggleAwakeRequested?.Invoke(); break;
             case CmdMute: ToggleMuteRequested?.Invoke(); break;
             case CmdPtt: PushToTalkRequested?.Invoke(); break;
-            case CmdDeck: DashboardRequested?.Invoke(); break;
             case CmdQuit: QuitRequested?.Invoke(); break;
         }
     }

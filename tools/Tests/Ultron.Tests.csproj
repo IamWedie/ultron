@@ -20,7 +20,6 @@
     <Compile Include="..\..\Services\UltronOptions.cs" />
     <Compile Include="..\..\Services\TrayIcon.cs" />
     <Compile Include="..\..\Services\HotkeyService.cs" />
-    <Compile Include="..\..\Services\DashboardServer.cs" />
     <!-- Tool layer: deliberately WinUI-free so routing/policy is unit-testable. -->
     <Compile Include="..\..\Services\Tools\ToolCall.cs" />
     <Compile Include="..\..\Services\Tools\ToolResult.cs" />

@@ -8,7 +8,6 @@ using System.IO;
 using System.Text.Json;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
-using QRCoder;
 using Ultron.Models;
 
 namespace Ultron.Services;
@@ -60,31 +59,6 @@ public sealed class SettingsDialogService
         var wakeBox = new TextBox { Text = _settings.HotkeyWake, Width = 180 };
         var font = new Microsoft.UI.Xaml.Media.FontFamily("Consolas");
         TextBlock Lbl(string s, int size = 12) => new() { Text = s, FontFamily = font, FontSize = size };
-
-        var webToggle = new ToggleSwitch { Header = "Enable LAN web deck (scan the QR on your phone/TV)", IsOn = _settings.WebDashboardEnabled };
-        var portBox = new TextBox { Text = _settings.WebDashboardPort.ToString(), Width = 90 };
-        var qrImage = new Image { Width = 216, Height = 216, Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Left };
-        var qrUrl = new TextBlock
-        {
-            FontFamily = font,
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)),
-        };
-        void RefreshQr()
-        {
-            if (!int.TryParse(portBox.Text.Trim(), out var p) || p is < 1 or > 65535)
-            {
-                qrImage.Source = null;
-                qrUrl.Text = "Port must be 1–65535.";
-                return;
-            }
-            var token = _mainWindow._dashboard?.Token ?? DashboardServer.NewToken();
-            qrImage.Source = BuildDeckQr(p, token);
-            qrUrl.Text = DeckUrl(p, token);
-        }
-        portBox.TextChanged += (_, _) => RefreshQr();
-        RefreshQr();
 
         // ---------- TELEGRAM VOICE CALLS ----------
         var tgMuted = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171));
@@ -217,11 +191,6 @@ public sealed class SettingsDialogService
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Push-to-talk ", 11), pttBox } },
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Mute mic     ", 11), muteBox } },
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Wake toggle  ", 11), wakeBox } },
-                        Lbl("WEB DECK — read-only conversation mirror for your phone/TV (QR):"),
-                        webToggle,
-                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Port  ", 11), portBox } },
-                        qrImage,
-                        qrUrl,
                         Lbl("TELEGRAM VOICE CALLS — real phone calls from the ULTRON account:"),
                         tgToggle,
                         Lbl("api_id (your ULTRON app's id at my.telegram.org):"),
@@ -300,29 +269,7 @@ public sealed class SettingsDialogService
                     else notifications.Add($"'{spec}' isn't a valid hotkey — left unchanged.");
                 }
 
-                var webPort = int.TryParse(portBox.Text.Trim(), out var p) && p is >= 1 and <= 65535 ? p : _settings.WebDashboardPort;
-                var webEnabled = webToggle.IsOn;
-                if (webEnabled != _settings.WebDashboardEnabled || webPort != _settings.WebDashboardPort)
-                {
-                    _settings.WebDashboardEnabled = webEnabled;
-                    _settings.WebDashboardPort = webPort;
-                    if (webEnabled)
-                    {
-                        _mainWindow.EnsureDashboard(webPort);
-                        _mainWindow.AddMessage("system", _mainWindow._dashboardUrl is not null
-                            ? $"Web deck live — scan the QR or open {_mainWindow._dashboardUrl}"
-                            : "Web deck failed to start. See ultron.log.");
-                    }
-                    else
-                    {
-                        _mainWindow._dashboard?.Dispose();
-                        _mainWindow._dashboard = null;
-                        _mainWindow._dashboardUrl = null;
-                        _mainWindow.AddMessage("system", "Web deck disabled.");
-                    }
-                }
 
-                _settings.Save();
                 _mainWindow.ApplyHotkeyBindings();
 
                 foreach (var n in notifications) _mainWindow.AddMessage("system", n);
@@ -420,43 +367,5 @@ public sealed class SettingsDialogService
             MainWindow.Dbg($"code prompt failed: {ex.Message}");
             _mainWindow.AddMessage("system", $"Telegram needs a login code: {hint}");
         }
-    }
-
-    private static string DeckUrl(int port, string token) =>
-        $"http://{Ultron.Services.DashboardServer.LanIp()}:{port}/?k={token}";
-
-    private static WriteableBitmap BuildDeckQr(int port, string token, int px = 240)
-    {
-        var qr = new QRCoder.QRCodeGenerator();
-        var data = qr.CreateQrCode($"http://{Ultron.Services.DashboardServer.LanIp()}:{port}/?k={token}", QRCoder.QRCodeGenerator.ECCLevel.M, forceUtf8: true);
-        var matrix = data.ModuleMatrix;
-        var size = matrix.Count;
-        var scale = Math.Max(1, px / (size + 8));
-        var dim = (size + 8) * scale;
-        var buf = new byte[dim * dim * 4];
-        for (var y = 0; y < dim; y++)
-        {
-            for (var x = 0; x < dim; x++)
-            {
-                var m = (x / scale) - 4;
-                var n = (y / scale) - 4;
-                var dark = m >= 0 && n >= 0 && m < size && n < size && matrix[n][m];
-                var i = (y * dim + x) * 4;
-                if (dark)
-                {
-                    buf[i] = 0x1A; buf[i + 1] = 0x1A; buf[i + 2] = 0x1A; buf[i + 3] = 0xFF;
-                }
-                else
-                {
-                    buf[i] = 0xFF; buf[i + 1] = 0xFF; buf[i + 2] = 0xFF; buf[i + 3] = 0xFF;
-                }
-            }
-        }
-        var bmp = new WriteableBitmap(dim, dim);
-        using (var stream = bmp.PixelBuffer.AsStream())
-        {
-            stream.Write(buf, 0, buf.Length);
-        }
-        return bmp;
     }
 }

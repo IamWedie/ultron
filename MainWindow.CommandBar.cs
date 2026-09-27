@@ -22,7 +22,6 @@ using System.Buffers;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
-using QRCoder;
 
 namespace Ultron;
 
@@ -168,7 +167,6 @@ public sealed partial class MainWindow
         _settings.MicMuted = _micMuted;
         try { _settings.Save(); } catch (Exception ex) { AppLog.Write("MainWindow", $"Settings save failed: {ex.Message}", AppLog.Level.Error); }
         _ = _gemini.SetMicMutedAsync(_micMuted);
-        _dashboard?.PushMute(_micMuted);
         DispatcherQueue.TryEnqueue(() =>
         {
             SetMicVisual(false);

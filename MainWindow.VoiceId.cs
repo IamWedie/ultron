@@ -22,7 +22,6 @@ using System.Buffers;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
-using QRCoder;
 
 namespace Ultron;
 
@@ -149,7 +148,6 @@ public sealed partial class MainWindow
             ConfidenceText.Text = _voiceId.OwnerEnrolled
                 ? $"{(s * 100):F0}%  (threshold {(s >= _voiceId.OwnerThreshold ? "MET" : "BELOW")} {_voiceId.OwnerThreshold:P0})"
                 : "no voice profile enrolled";
-            _dashboard?.PushConfidence(s);
         });
     }
 

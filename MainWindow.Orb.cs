@@ -22,7 +22,6 @@ using System.Buffers;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
-using QRCoder;
 
 namespace Ultron;
 

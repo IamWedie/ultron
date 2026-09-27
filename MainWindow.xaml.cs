@@ -22,7 +22,6 @@ using System.Buffers;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
-using QRCoder;
 
 namespace Ultron;
 
@@ -76,8 +75,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     private TrayIcon? _tray;
     internal HotkeyService? _hotkeys;
     internal NotificationService? _notify;
-    internal DashboardServer? _dashboard;
-    internal string? _dashboardUrl;
     private volatile bool _micMuted;
     internal DispatcherTimer? _heartbeatTimer;
     internal DispatcherTimer? _callTimer;
@@ -204,7 +201,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         {
             Watchdog.WriteQuitFlag();
             _heartbeatTimer?.Stop();
-            _dashboard?.Dispose();
             _hotkeys?.Dispose();
             _notify?.Dispose();
             _tray?.Dispose();
@@ -293,8 +289,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         _hotkeys.Pressed += OnHotkeyPressed;
         ApplyHotkeyBindings();
 
-        _tray.DashboardRequested += OnDashboardRequested;
-
         NotificationService.EnsureAumidShortcut();
         _notify = new NotificationService(_tray);
 
@@ -308,14 +302,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         // Call duration timer
         _callTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _callTimer.Tick += (_, _) => UpdateCallDuration();
-
-        // LAN web deck (QR in Setup): live read-only mirror of the conversation.
-        if (_settings.WebDashboardEnabled)
-        {
-            EnsureDashboard(_settings.WebDashboardPort);
-            if (_dashboardUrl is not null)
-                AddMessage("system", $"Web deck live — scan the QR in Setup or open {_dashboardUrl}");
-        }
 
         // Track the window the user is actually looking at, so type_text and
         // friends can inject input into the real target instead of our own window.
@@ -648,31 +634,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         var font = new Microsoft.UI.Xaml.Media.FontFamily("Consolas");
         TextBlock Lbl(string s, int size = 12) => new() { Text = s, FontFamily = font, FontSize = size };
 
-        var webToggle = new ToggleSwitch { Header = "Enable LAN web deck (scan the QR on your phone/TV)", IsOn = _settings.WebDashboardEnabled };
-        var portBox = new TextBox { Text = _settings.WebDashboardPort.ToString(), Width = 90 };
-        var qrImage = new Image { Width = 216, Height = 216, Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Left };
-        var qrUrl = new TextBlock
-        {
-            FontFamily = font,
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)),
-        };
-        void RefreshQr()
-        {
-            if (!int.TryParse(portBox.Text.Trim(), out var p) || p is < 1 or > 65535)
-            {
-                qrImage.Source = null;
-                qrUrl.Text = "Port must be 1–65535.";
-                return;
-            }
-            var token = _dashboard?.Token ?? DashboardServer.NewToken();
-            qrImage.Source = BuildDeckQr(p, token);
-            qrUrl.Text = DeckUrl(p, token);
-        }
-        portBox.TextChanged += (_, _) => RefreshQr();
-        RefreshQr();
-
         // ---------- TELEGRAM VOICE CALLS ----------
         var tgMuted = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171));
         var tgAccent = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 242, 201, 76));
@@ -808,11 +769,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Push-to-talk ", 11), pttBox } },
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Mute mic     ", 11), muteBox } },
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Wake toggle  ", 11), wakeBox } },
-                        Lbl("WEB DECK — read-only conversation mirror for your phone/TV (QR):"),
-                        webToggle,
-                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Port  ", 11), portBox } },
-                        qrImage,
-                        qrUrl,
                         Lbl("TELEGRAM VOICE CALLS — real phone calls from the ULTRON account:"),
                         tgToggle,
                         Lbl("api_id (your ULTRON app's id at my.telegram.org):"),
@@ -894,29 +850,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                     else notifications.Add($"'{spec}' isn't a valid hotkey — left unchanged.");
                 }
 
-                var webPort = int.TryParse(portBox.Text.Trim(), out var p) && p is >= 1 and <= 65535 ? p : _settings.WebDashboardPort;
-                var webEnabled = webToggle.IsOn;
-                if (webEnabled != _settings.WebDashboardEnabled || webPort != _settings.WebDashboardPort)
-                {
-                    _settings.WebDashboardEnabled = webEnabled;
-                    _settings.WebDashboardPort = webPort;
-                    if (webEnabled)
-                    {
-                        EnsureDashboard(webPort);
-                        AddMessage("system", _dashboardUrl is not null
-                            ? $"Web deck live — scan the QR or open {_dashboardUrl}"
-                            : "Web deck failed to start. See ultron.log.");
-                    }
-                    else
-                    {
-                        _dashboard?.Dispose();
-                        _dashboard = null;
-                        _dashboardUrl = null;
-                        AddMessage("system", "Web deck disabled.");
-                    }
-                }
 
-                _settings.Save();
                 ApplyHotkeyBindings();
 
                 foreach (var n in notifications) AddMessage("system", n);
