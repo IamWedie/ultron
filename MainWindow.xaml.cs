@@ -84,6 +84,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     // Centralized tool registry with authorization metadata
     private readonly ToolRouter _toolRouter;
     private readonly UndoLedger _undo = new();
+    private readonly CommandRunner _commandRunner = new();
 
     public MainWindow()
     {
@@ -389,13 +390,13 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 // desktop input
                 Async("type_text", HandleTypeTextAsync),
                 Sync("press_key", HandlePressKey),
-                Sync("desktop_control", HandleDesktopControl),
+                Async("desktop_control", HandleDesktopControl),
                 Sync("window_manage", HandleWindowManage),
                 // system
                 Sync("system_status", _ => HandleSystemStatus()),
                 // apps
                 new AppToolService(new AppResolver(), new SystemProcessLauncher(), this, _undo),
-                Sync("computer_settings", HandleComputerSettings),
+                Async("computer_settings", HandleComputerSettings),
                 Sync("set_away_mode", HandleSetAway),
                 Sync("shutdown_jarvis", _ => Shutdown()),
                 // web / media
@@ -3022,7 +3023,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         return $"Memory: {mem} MB, Threads across system: {totalThreads}, Uptime: {DateTime.Now - proc.StartTime:hh\\:mm\\:ss}";
     }
 
-    private string HandleComputerSettings(Dictionary<string, object> args)
+    private async Task<string> HandleComputerSettings(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         switch (action.ToLowerInvariant())
@@ -3036,10 +3037,10 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 string result;
                 switch (action.ToLowerInvariant())
                 {
-                    case "volume_up": result = RunCommand("nircmd.exe", "changesysvolume 2000"); break;
-                    case "volume_down": result = RunCommand("nircmd.exe", "changesysvolume -2000"); break;
-                    case "mute": result = RunCommand("nircmd.exe", "mutesysvolume 1"); break;
-                    default: result = RunCommand("nircmd.exe", "mutesysvolume 0"); break;
+                    case "volume_up": result = await RunAsync("nircmd.exe", "changesysvolume 2000"); break;
+                    case "volume_down": result = await RunAsync("nircmd.exe", "changesysvolume -2000"); break;
+                    case "mute": result = await RunAsync("nircmd.exe", "mutesysvolume 1"); break;
+                    default: result = await RunAsync("nircmd.exe", "mutesysvolume 0"); break;
                 }
                 // Undo restores the EXACT prior volume + mute state. If we could
                 // not read the value, register nothing — undoing a guess is worse.
@@ -3056,37 +3057,19 @@ var (v, m) = before;
                 }
                 return result;
             }
-            case "shutdown": return RunCommand("shutdown", "/s /t 30");
-            case "restart": return RunCommand("shutdown", "/r /t 30");
-            case "sleep": return RunCommand("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0");
-            case "lock": return RunCommand("rundll32.exe", "user32.dll,LockWorkStation");
-            case "screenshot": return RunCommand("snippingtool", "/clip");
+            case "shutdown": return await RunAsync("shutdown", "/s /t 30");
+            case "restart": return await RunAsync("shutdown", "/r /t 30");
+            case "sleep": return await RunAsync("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0");
+            case "lock": return await RunAsync("rundll32.exe", "user32.dll,LockWorkStation");
+            case "screenshot": return await RunAsync("snippingtool", "/clip");
             default: return $"Unknown action: {action}";
         }
     }
 
-    private static string RunCommand(string file, string args)
+    private async Task<string> RunAsync(string file, string args)
     {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo(file, args)
-            {
-                CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-            };
-            var p = System.Diagnostics.Process.Start(psi);
-            if (p == null) return $"Failed: could not start {file}";
-            p.WaitForExit(30000); // 30 second timeout
-            var stdout = p.StandardOutput.ReadToEnd();
-            var stderr = p.StandardError.ReadToEnd();
-            var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
-            return $"Exit code: {p.ExitCode}. {(string.IsNullOrEmpty(output) ? "No output." : output.Trim())}";
-        }
-        catch (Exception ex) { return $"Failed: {ex.Message}"; }
+        var result = await _commandRunner.RunAsync(file, args);
+        return result.Describe(file);
     }
 
     private async Task<string> HandleWebSearchAsync(Dictionary<string, object> args)
@@ -3181,7 +3164,7 @@ var (v, m) = before;
         return "Browser control: action not recognized or missing parameters.";
     }
 
-    private string HandleDesktopControl(Dictionary<string, object> args)
+    private async Task<string> HandleDesktopControl(Dictionary<string, object> args)
     {
         var action = args.GetValueOrDefault("action")?.ToString() ?? "";
         var x = TryIntArg(args, "x");
@@ -3192,8 +3175,7 @@ var (v, m) = before;
             switch (action.ToLowerInvariant())
             {
                 case "screenshot":
-                    RunCommand("snippingtool", "/clip");
-                    return "Opened the snippet tool (screen capture).";
+                    return await RunAsync("snippingtool", "/clip");
 
                 case "move_mouse":
                 case "mouse_move":
