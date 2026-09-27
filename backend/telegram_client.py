@@ -179,6 +179,9 @@ class TelegramController:
         self._target_username = ""
         self._target_name = ""
         self._audio_bridge = None
+        # Set from the settings dialog over IPC. Wins over the environment
+        # variable, which is fixed for the life of the process.
+        self._calls_enabled_override: Optional[bool] = None
 
     @property
     def audio_bridge(self):
@@ -586,7 +589,20 @@ class TelegramController:
             return value
         return str(value).strip().lower() in ("1", "true", "yes", "on")
 
+    def set_calls_enabled(self, enabled: Optional[bool]) -> None:
+        """Apply the call-enabled flag from the settings dialog.
+
+        ``ULTRON_TELEGRAM_ENABLED`` is exported once, when the parent process
+        spawns this backend, and ``os.environ`` cannot be changed afterwards, so
+        flipping the toggle in settings had no effect on a running backend - the
+        toggle read as on while every call was refused as disabled. ``None``
+        clears the override and hands control back to the environment.
+        """
+        self._calls_enabled_override = None if enabled is None else bool(enabled)
+
     def _calls_enabled(self) -> bool:
+        if self._calls_enabled_override is not None:
+            return self._calls_enabled_override
         env_value = os.environ.get("ULTRON_TELEGRAM_ENABLED")
         if env_value is not None:
             return self._parse_bool(env_value)

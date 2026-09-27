@@ -2000,6 +2000,14 @@ class GeminiSession:
         elif msg_type == "telegram_resolve_target":
             if self.telegram is not None:
                 await self.telegram.resolve_target(msg)
+        elif msg_type == "set_telegram_call_enabled":
+            if self.telegram is not None:
+                raw = msg.get("enabled")
+                self.telegram.set_calls_enabled(
+                    None if raw is None else _parse_bool(raw, False))
+            else:
+                _send_event({"type": "telegram_call_result", "ok": False,
+                             "message": "Telegram client module not loaded."})
         elif msg_type == "telegram_call_start":
             if self.telegram is not None:
                 await self.telegram.call_start(

@@ -37,6 +37,10 @@ public sealed partial class MainWindow
             {
                 case "connected":
                     _geminiMode = true;
+                    // Re-apply the call-enabled flag on every connect: a
+                    // respawned backend is a fresh process, so it only knows the
+                    // spawn-time environment value, not the current toggle.
+                    _ = _gemini.SendTelegramCallEnabledAsync(_settings.TelegramCallEnabled);
                     // Apply the persisted Ultron voice profile on every connect.
                     _ = _gemini.SendVoiceDspAsync(
                         _settings.VoiceDspEnabled,

@@ -697,6 +697,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 _settings.Save();
             }
             _gemini.TelegramOptions = new TelegramCallOptions(id, hash, phone, tgToggle.IsOn, tgTarget.Text.Trim());
+            _ = _gemini.SendTelegramCallEnabledAsync(tgToggle.IsOn);
             _tgStatusText.Text = "Connecting to Telegram…";
             _tgStatusText.Foreground = tgMuted;
             await _gemini.SendTelegramLoginAsync(phone, id, hash);
@@ -862,9 +863,13 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
 
 
                 ApplyHotkeyBindings();
+                _settings.Save();
 
                 foreach (var n in notifications) AddMessage("system", n);
             }
+            // The spawn-time env var is frozen for the life of the backend
+            // process, so the toggle has to be pushed to the running one.
+            _ = _gemini.SendTelegramCallEnabledAsync(tgToggle.IsOn);
             if (!string.IsNullOrEmpty(key))
             {
                 var restartBackend = previousKey != _settings.GeminiApiKey || previousVoice != _settings.GeminiVoice;

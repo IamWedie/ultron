@@ -349,6 +349,16 @@ public sealed class GeminiBackend : IDisposable
         await SendAsync(new { type = "telegram_resolve_target", target });
     }
 
+    /// <summary>Pushes the call-enabled flag to the already-running backend.
+    /// The spawn-time ULTRON_TELEGRAM_ENABLED environment variable cannot be
+    /// changed for a live process, so without this the settings toggle only took
+    /// effect on the next launch and Test Call reported calls as disabled while
+    /// the toggle read as on.</summary>
+    public async Task SendTelegramCallEnabledAsync(bool enabled)
+    {
+        await SendAsync(new { type = "set_telegram_call_enabled", enabled });
+    }
+
     public async Task SendTelegramCallStartAsync(object? payload = null)
     {
         await SendAsync(new { type = "telegram_call_start", payload });
