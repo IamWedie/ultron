@@ -34,6 +34,7 @@
     <Compile Include="..\..\Services\Processes\IProcessLauncher.cs" />
     <Compile Include="..\..\Services\Apps\AppResolver.cs" />
     <Compile Include="..\..\Services\Tools\Apps\AppToolService.cs" />
+    <Compile Include="..\..\Services\ModelRepo.cs" />
   </ItemGroup>
 
   <ItemGroup>

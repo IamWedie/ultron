@@ -84,7 +84,10 @@ public sealed class SystemProcessLauncher : IProcessLauncher
             // makes a PID-accurate undo possible.
             UseShellExecute = false,
         };
-        return new SystemProcessHandle(Process.Start(info));
+        // Process.Start returns null when the process could not be started, which
+        // the caller reports as a launch failure rather than a crash.
+        var process = Process.Start(info);
+        return process is null ? null : new SystemProcessHandle(process);
     }
 
     public IReadOnlyList<IProcessHandle> FindByImageName(string imageName)
