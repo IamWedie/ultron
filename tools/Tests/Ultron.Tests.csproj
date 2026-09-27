@@ -28,6 +28,7 @@
     <Compile Include="..\..\Services\Tools\PolicyEngine.cs" />
     <Compile Include="..\..\Services\Tools\ToolRouter.cs" />
     <Compile Include="..\..\Services\UndoLedger.cs" />
+  <Compile Include="..\..\Services\AdbShell.cs" />
     <Compile Include="..\..\Services\Tools\Files\PathPolicy.cs" />
     <Compile Include="..\..\Services\Tools\Files\FileToolService.cs" />
     <Compile Include="..\..\Services\Processes\IProcessLauncher.cs" />

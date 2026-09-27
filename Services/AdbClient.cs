@@ -239,7 +239,7 @@ public sealed class AdbClient
         Thread.Sleep(500);
         Shell("input swipe 540 2000 540 500 300");
         Thread.Sleep(1000);
-        ShellRaw($"input text {pin}");
+        ShellRaw($"input text {AdbShell.Quote(pin)}");
         Thread.Sleep(300);
         Shell("input keyevent KEYCODE_ENTER");
         Thread.Sleep(1000);
@@ -272,9 +272,9 @@ public sealed class AdbClient
     {
         const string remote = "/sdcard/ultron_screenshot.png";
         var local = Path.Combine(Path.GetTempPath(), "ultron_screenshot.png");
-        Shell($"screencap -p {remote}");
+        ShellRaw($"screencap -p {AdbShell.Quote(remote)}");
         Run(new[] { "pull", remote, local });
-        Shell($"rm {remote}");
+        ShellRaw($"rm {AdbShell.Quote(remote)}");
         return File.Exists(local) ? local : "Screenshot failed.";
     }
 
@@ -283,9 +283,9 @@ public sealed class AdbClient
         seconds = Math.Min(seconds, 180);
         const string remote = "/sdcard/ultron_recording.mp4";
         var local = Path.Combine(Path.GetTempPath(), "ultron_recording.mp4");
-        ShellRaw($"screenrecord --time-limit {seconds} {remote}");
+        ShellRaw($"screenrecord --time-limit {seconds} {AdbShell.Quote(remote)}");
         Run(new[] { "pull", remote, local });
-        Shell($"rm {remote}");
+        ShellRaw($"rm {AdbShell.Quote(remote)}");
         return File.Exists(local) ? local : "Recording failed.";
     }
 
@@ -306,8 +306,11 @@ public sealed class AdbClient
 
     public string TypeText(string text)
     {
-        var escaped = text.Replace(" ", "%s").Replace("&", "\\&").Replace("'", "\\'").Replace("\"", "\\\"");
-        ShellRaw($"input text '{escaped}'");
+        // The old code backslash-escaped ' " & and then wrapped the value in
+        // single quotes. Inside single quotes a backslash is literal, so that
+        // escaping never applied and a value containing a quote ended the
+        // argument early. Quote() escapes the quote itself instead.
+        ShellRaw($"input text {AdbShell.QuoteInputText(text)}");
         return $"Typed: {text}";
     }
 
@@ -316,13 +319,13 @@ public sealed class AdbClient
         foreach (var ch in text)
         {
             if (ch == ' ') Shell("input keyevent KEYCODE_SPACE");
-            else ShellRaw($"input text '{ch}'");
+            else ShellRaw($"input text {AdbShell.Quote(ch.ToString())}");
             Thread.Sleep(50);
         }
         return $"Typed slowly: {text}";
     }
 
-    public string KeyEvent(string keycode) { Shell($"input keyevent {keycode}"); return $"Key event {keycode} sent."; }
+    public string KeyEvent(string keycode) { ShellRaw($"input keyevent {AdbShell.Quote(keycode)}"); return $"Key event {keycode} sent."; }
     public string VolumeUp() { Shell("input keyevent KEYCODE_VOLUME_UP"); return "Volume up."; }
     public string VolumeDown() { Shell("input keyevent KEYCODE_VOLUME_DOWN"); return "Volume down."; }
     public string VolumeMute() { Shell("input keyevent KEYCODE_VOLUME_MUTE"); return "Muted."; }
@@ -355,16 +358,16 @@ public sealed class AdbClient
         if (package == "youtube")
         {
             var comp = ResolveLaunchIntent("com.google.android.youtube");
-            if (comp is not null) { ShellRaw($"am start -n {comp}"); return "YouTube opened."; }
+            if (comp is not null) { ShellRaw($"am start -n {AdbShell.Quote(comp)}"); return "YouTube opened."; }
         }
         var resolved = ResolveLaunchIntent(package);
-        if (resolved is not null) { ShellRaw($"am start -n {resolved}"); return $"Opened {package}."; }
-        Shell($"monkey -p {package} -c android.intent.category.LAUNCHER 1");
+        if (resolved is not null) { ShellRaw($"am start -n {AdbShell.Quote(resolved)}"); return $"Opened {package}."; }
+        ShellRaw($"monkey -p {AdbShell.Quote(package)} -c android.intent.category.LAUNCHER 1");
         return $"Opened {package} (via monkey fallback).";
     }
 
-    public string CloseApp(string package) { ShellRaw($"am force-stop {package}"); return $"Closed {package}."; }
-    public string ClearAppData(string package) { ShellRaw($"pm clear {package}"); return $"Cleared data for {package}."; }
+    public string CloseApp(string package) { ShellRaw($"am force-stop {AdbShell.Quote(package)}"); return $"Closed {package}."; }
+    public string ClearAppData(string package) { ShellRaw($"pm clear {AdbShell.Quote(package)}"); return $"Cleared data for {package}."; }
 
     public string ListApps()
     {
@@ -383,13 +386,13 @@ public sealed class AdbClient
 
     public string AppInfo(string package)
     {
-        var out1 = ShellRaw($"dumpsys package {package} | head -30");
+        var out1 = ShellRaw($"dumpsys package {AdbShell.Quote(package)} | head -30");
         return !string.IsNullOrEmpty(out1) ? out1 : $"Could not get info for {package}.";
     }
 
     public string IsAppRunning(string package)
     {
-        var out1 = ShellRaw($"pidof {package}");
+        var out1 = ShellRaw($"pidof {AdbShell.Quote(package)}");
         return !string.IsNullOrEmpty(out1) ? $"{package} is running (PID: {out1})." : $"{package} is NOT running.";
     }
 
@@ -403,7 +406,7 @@ public sealed class AdbClient
 
     private string? ResolveLaunchIntent(string package)
     {
-        var out1 = ShellRaw($"cmd package resolve-activity --brief {package}");
+        var out1 = ShellRaw($"cmd package resolve-activity --brief {AdbShell.Quote(package)}");
         foreach (var line in out1.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             if (line.Contains('/') && !line.StartsWith("priority", StringComparison.Ordinal))
@@ -420,7 +423,7 @@ public sealed class AdbClient
     {
         _cameraFacing = "back";
         var comp = ResolveLaunchIntent("com.hihonor.camera");
-        if (comp is not null) { ShellRaw($"am start -n {comp}"); return "Camera opened."; }
+        if (comp is not null) { ShellRaw($"am start -n {AdbShell.Quote(comp)}"); return "Camera opened."; }
         var r = ShellRaw("am start -n com.hihonor.camera/.Camera");
         if (r.Contains("Error"))
             r = ShellRaw("am start -a android.media.action.STILL_IMAGE_CAMERA");
@@ -518,20 +521,20 @@ public sealed class AdbClient
 
     public string SetClipboard(string text)
     {
-        ShellRaw($"am broadcast -a clipper.set -e text \"{text}\"");
-        ShellRaw($"input text '{text.Replace(" ", "%s")}'");
+        ShellRaw($"am broadcast -a clipper.set -e text {AdbShell.Quote(text)}");
+        ShellRaw($"input text {AdbShell.QuoteInputText(text)}");
         return $"Clipboard set: {text}";
     }
 
     public string ShareText(string text)
     {
-        ShellRaw($"am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT \"{text}\"");
+        ShellRaw($"am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT {AdbShell.Quote(text)}");
         return "Share dialog opened.";
     }
 
     public string ShareFile(string path)
     {
-        ShellRaw($"am start -a android.intent.action.SEND -t application/octet-stream --eu android.intent.extra.STREAM \"file://{path}\"");
+        ShellRaw($"am start -a android.intent.action.SEND -t application/octet-stream --eu android.intent.extra.STREAM {AdbShell.Quote("file://" + path)}");
         return $"Sharing {path}.";
     }
 
@@ -541,7 +544,7 @@ public sealed class AdbClient
 
     public string ListFiles(string path = "/sdcard/")
     {
-        var out1 = ShellRaw($"ls -la {path}");
+        var out1 = ShellRaw($"ls -la {AdbShell.Quote(path)}");
         return !string.IsNullOrEmpty(out1) ? out1 : $"Could not list {path}";
     }
 
@@ -553,16 +556,16 @@ public sealed class AdbClient
 
     public string FindFiles(string name)
     {
-        var out1 = ShellRaw($"find /sdcard -name '*{name}*' -type f 2>/dev/null | head -20");
+        var out1 = ShellRaw($"find /sdcard -name {AdbShell.Quote("*" + name + "*")} -type f 2>/dev/null | head -20");
         return !string.IsNullOrEmpty(out1) ? out1 : $"No files matching '{name}' found.";
     }
 
-    public string DeleteFile(string path) { ShellRaw($"rm -f {path}"); return $"Deleted {path}."; }
-    public string DeleteFolder(string path) { ShellRaw($"rm -rf {path}"); return $"Deleted folder {path}."; }
+    public string DeleteFile(string path) { ShellRaw($"rm -f {AdbShell.Quote(path)}"); return $"Deleted {path}."; }
+    public string DeleteFolder(string path) { ShellRaw($"rm -rf {AdbShell.Quote(path)}"); return $"Deleted folder {path}."; }
 
     public string FileInfo(string path)
     {
-        var out1 = ShellRaw($"ls -la {path}");
+        var out1 = ShellRaw($"ls -la {AdbShell.Quote(path)}");
         return !string.IsNullOrEmpty(out1) ? out1 : $"File not found: {path}";
     }
 
@@ -586,13 +589,13 @@ public sealed class AdbClient
         return $"Pushed to {phonePath}.";
     }
 
-    public string CreateFolder(string path) { ShellRaw($"mkdir -p {path}"); return $"Created {path}."; }
-    public string MoveFile(string src, string dst) { ShellRaw($"mv {src} {dst}"); return $"Moved {src} to {dst}."; }
-    public string CopyFile(string src, string dst) { ShellRaw($"cp {src} {dst}"); return $"Copied {src} to {dst}."; }
+    public string CreateFolder(string path) { ShellRaw($"mkdir -p {AdbShell.Quote(path)}"); return $"Created {path}."; }
+    public string MoveFile(string src, string dst) { ShellRaw($"mv {AdbShell.Quote(src)} {AdbShell.Quote(dst)}"); return $"Moved {src} to {dst}."; }
+    public string CopyFile(string src, string dst) { ShellRaw($"cp {AdbShell.Quote(src)} {AdbShell.Quote(dst)}"); return $"Copied {src} to {dst}."; }
 
     public string SearchFiles(string query)
     {
-        var out1 = ShellRaw($"find /sdcard -iname '*{query}*' 2>/dev/null | head -20");
+        var out1 = ShellRaw($"find /sdcard -iname {AdbShell.Quote("*" + query + "*")} 2>/dev/null | head -20");
         return !string.IsNullOrEmpty(out1) ? out1 : $"No files matching '{query}'.";
     }
 
@@ -676,7 +679,7 @@ public sealed class AdbClient
 
     public string Ping(string host)
     {
-        var out1 = ShellRaw($"ping -c 3 {host}");
+        var out1 = ShellRaw($"ping -c 3 {AdbShell.Quote(host)}");
         return !string.IsNullOrEmpty(out1) ? out1 : "Ping failed.";
     }
 
@@ -702,7 +705,7 @@ public sealed class AdbClient
     //  CALLS & SMS
     // ════════════════════════════════════════════════════════════════
 
-    public string MakeCall(string number) { ShellRaw($"am start -a android.intent.action.CALL -d tel:{number}"); return $"Calling {number}..."; }
+    public string MakeCall(string number) { ShellRaw($"am start -a android.intent.action.CALL -d {AdbShell.Quote("tel:" + number)}"); return $"Calling {number}..."; }
     public string PhoneCall(string number) => MakeCall(number);
     public string AnswerCall() { ShellRaw("input keyevent KEYCODE_CALL"); return "Call answered."; }
     public string RejectCall() { ShellRaw("input keyevent KEYCODE_ENDCALL"); return "Call rejected."; }
@@ -710,7 +713,7 @@ public sealed class AdbClient
 
     public string SendSms(string number, string message)
     {
-        ShellRaw($"am start -a android.intent.action.SENDTO -d \"sms:{number}\" --es sms_body \"{message}\" --ez exit_on_sent true");
+        ShellRaw($"am start -a android.intent.action.SENDTO -d {AdbShell.Quote("sms:" + number)} --es sms_body {AdbShell.Quote(message)} --ez exit_on_sent true");
         return $"SMS to {number}: {message}";
     }
 
@@ -747,7 +750,7 @@ public sealed class AdbClient
 
     public string SearchContacts(string name)
     {
-        var out1 = ShellRaw($"content query --uri content://com.android.contacts/contacts --projection display_name --where \"display_name LIKE '%{name}%'\" | head -10");
+        var out1 = ShellRaw($"content query --uri content://com.android.contacts/contacts --projection display_name --where {AdbShell.Quote("display_name LIKE '%" + name + "%'")} | head -10");
         return !string.IsNullOrEmpty(out1) ? out1 : $"No contacts matching '{name}'.";
     }
 
@@ -812,11 +815,11 @@ public sealed class AdbClient
         return out1.Length > 3000 ? out1[..3000] : (!string.IsNullOrEmpty(out1) ? out1 : "No log entries.");
     }
 
-    public string GetProp(string prop) => Shell($"getprop {prop}");
+    public string GetProp(string prop) => ShellRaw($"getprop {AdbShell.Quote(prop)}");
 
     public string SetProp(string prop, string value)
     {
-        ShellRaw($"setprop {prop} {value}");
+        ShellRaw($"setprop {AdbShell.Quote(prop)} {AdbShell.Quote(value)}");
         return $"Set {prop} = {value}.";
     }
 
@@ -826,12 +829,12 @@ public sealed class AdbClient
         return out1.Length > 2000 ? out1[..2000] : (!string.IsNullOrEmpty(out1) ? out1 : "No packages.");
     }
 
-    public string GrantPermission(string package, string permission) { ShellRaw($"pm grant {package} {permission}"); return $"Granted {permission} to {package}."; }
-    public string RevokePermission(string package, string permission) { ShellRaw($"pm revoke {package} {permission}"); return $"Revoked {permission} from {package}."; }
+    public string GrantPermission(string package, string permission) { ShellRaw($"pm grant {AdbShell.Quote(package)} {AdbShell.Quote(permission)}"); return $"Granted {permission} to {package}."; }
+    public string RevokePermission(string package, string permission) { ShellRaw($"pm revoke {AdbShell.Quote(package)} {AdbShell.Quote(permission)}"); return $"Revoked {permission} from {package}."; }
 
     public string Notify(string title, string message)
     {
-        ShellRaw($"cmd notification post -S bigtext -t \"{title}\" \"ultron\" \"{message}\" 2>/dev/null");
+        ShellRaw($"cmd notification post -S bigtext -t {AdbShell.Quote(title)} \"ultron\" {AdbShell.Quote(message)} 2>/dev/null");
         return $"Notification sent: {title} — {message}";
     }
 
