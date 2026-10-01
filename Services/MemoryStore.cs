@@ -176,34 +176,40 @@ public sealed class MemoryStore : IDisposable
         finally { _gate.Release(); }
     }
 
-    public async ValueTask AddFactAsync(string fact, string topic = "", string user = "")
+    /// <summary>Read every row still sitting in the legacy <c>facts</c> table,
+    /// oldest first, without modifying anything.
+    ///
+    /// Long-term memory used to be written here as well as to long_term.json,
+    /// which left the model's save_memory tool and the Memory panel pointed at two
+    /// stores that never saw each other's writes. long_term.json is now the only
+    /// fact store, so the leftovers are imported exactly once and the table is
+    /// then cleared. The conversation transcript is unaffected.</summary>
+    public async Task<List<string>> ReadLegacyFactsAsync()
     {
-        fact = Scrub(fact.Trim());
-        if (fact.Length == 0) return;
         await _gate.WaitAsync();
         try
         {
-            Conn();
-            _insFact!.Parameters["$ts"].Value = Now();
-            _insFact!.Parameters["$topic"].Value = topic ?? "";
-            _insFact!.Parameters["$fact"].Value = fact;
-            _insFact!.Parameters["$user"].Value = user ?? "";
-            await _insFact!.ExecuteNonQueryAsync();
+            var rows = new List<string>();
+            await using var read = Conn().CreateCommand();
+            read.CommandText = "SELECT fact FROM facts ORDER BY id";
+            await using var r = await read.ExecuteReaderAsync();
+            while (await r.ReadAsync()) rows.Add(r.GetString(0));
+            return rows;
         }
         finally { _gate.Release(); }
     }
 
-    public async Task<List<string>> ListFactsAsync()
+    /// <summary>Empty the legacy <c>facts</c> table. Call only after the rows have
+    /// been successfully imported into long_term.json — deleting first would make
+    /// a failed import unrecoverable.</summary>
+    public async Task ClearLegacyFactsAsync()
     {
         await _gate.WaitAsync();
         try
         {
             await using var cmd = Conn().CreateCommand();
-            cmd.CommandText = "SELECT fact FROM facts ORDER BY id";
-            var facts = new List<string>();
-            await using var r = await cmd.ExecuteReaderAsync();
-            while (await r.ReadAsync()) facts.Add(r.GetString(0));
-            return facts;
+            cmd.CommandText = "DELETE FROM facts";
+            await cmd.ExecuteNonQueryAsync();
         }
         finally { _gate.Release(); }
     }

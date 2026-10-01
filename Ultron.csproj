@@ -30,28 +30,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" GeneratePathProperty="true" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260804001" />
-    <PackageReference Include="NAudio" Version="3.0.1" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- The WindowsAppSDK metapackage transitively pulls Microsoft.WindowsAppSDK.ML which ships its own
-         onnxruntime.dll WITHOUT ConvInteger support (the int8 quantized on-device models need it). It
-         overwrites the DirectML-compatible onnxruntime.dll from Microsoft.ML.OnnxRuntime.DirectML during
-         the self-contained payload copy. Restore the DirectML natives after build so on-device
-         inference (Whisper STT, Silero VAD) keeps working. -->
-    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime.dll" />
-    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\onnxruntime_providers_shared.dll" />
-    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\DirectML.dll" />
-    <MicrosoftWindowsAppSDKFilesExcluded Include="$(NuGetPackageRoot)microsoft.windowsappsdk.ml\1.8.2197\runtimes-framework\win-x64\native\DirectML.Debug.dll" />
-  </ItemGroup>
-
-  <Target Name="RestoreDirectMLRuntime" AfterTargets="Build">
-    <Copy SourceFiles="$(PkgMicrosoft_ML_OnnxRuntime_DirectML)\runtimes\win-x64\native\onnxruntime.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" />
-    <Copy SourceFiles="$(PkgMicrosoft_ML_OnnxRuntime_DirectML)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" />
-  </Target>
+  <!-- The C# app no longer runs any ONNX model: local Whisper STT and the C#
+       SileroVad are deleted, and speech recognition/synthesis are cloud-only.
+       The remaining silero-vad.onnx is loaded by the Python backend through its
+       own onnxruntime dependency, so no managed inference runtime is needed here. -->
 
   <ItemGroup>
     <Content Include="Assets\**" />

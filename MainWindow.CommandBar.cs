@@ -74,90 +74,61 @@ public sealed partial class MainWindow
     private void MicButton_Click(object sender, RoutedEventArgs e)
     {
         _lastInteraction = DateTime.UtcNow;
-        if (_geminiMode && _gemini.IsConnected) { ToggleAwake(); return; }
         if (_micMuted)
         {
             AddMessage("system", "Mic is muted — press Win+Alt+M to unmute.");
             return;
         }
-        ToggleLocalPtt();
+        ToggleAwake();
     }
 
     private void TogglePtt()
     {
         _lastInteraction = DateTime.UtcNow;
-        if (_geminiMode && _gemini.IsConnected) { ToggleAwake(); return; }
         if (_micMuted) return;
-        DispatcherQueue.TryEnqueue(() => ToggleLocalPtt());
+        DispatcherQueue.TryEnqueue(() => ToggleAwake());
     }
 
-    private void ToggleLocalPtt()
-    {
-        // Manual awake/asleep override. With the wake gate armed, Gemini
-        // starts asleep and only hears you after "Hey Ultron"; this button
-        // forces the state either way. While Gemini talks the mic is
-        // auto-muted (echo cancel), so speak after it finishes or wake it
-        // again.
-        if (_verifyBuffer is not null) { FinalizeVerify(); return; }
-        if (_voiceId.OwnerEnrolled && _sm.Current is AssistantState.Sleep or AssistantState.Rest)
-        {
-            AddMessage("system", "PTT: speak your passphrase to verify.");
-            StartWakeVerify();
-            return;
-        }
-        if (_audio is not null && _audio.IsActive)
-        {
-            _audio.Stop();
-            SetMicVisual(false);
-            OrbPulse.ScaleX = OrbPulse.ScaleY = 1;
-            if (_whisper is null || !_modelsLoaded) { AddMessage("system", "PTT released — models not loaded yet."); return; }
-            var pcm = CaptureSnapshot();
-            Dbg($"PTT release: pcm={pcm.Length}, sttQueued={_sttQueue.Count}, modelsLoaded={_modelsLoaded}");
-            if (pcm.Length >= 3200)
-            {
-                _sttQueue.Enqueue(pcm);
-                _ = PumpSttAsync();
-            }
-            else
-                AddMessage("system", "PTT: no speech detected.");
-            return;
-        }
-        var err = _audio?.Start() ?? "";
-        if (err.Length > 0)
-        {
-            AddMessage("system", err);
-            return;
-        }
-        _sm.EngageFromText();
-        SetMicVisual(true);
-        AddMessage("system", "PTT: listening... (speak, then release to transcribe).");
-    }
-
+    /// <summary>
+    /// Flips the microphone gate — audio streaming to Gemini on or off. This is
+    /// NOT the "Hey Ultron" gate: that one is a system-prompt instruction armed by
+    /// <see cref="_wakeGateOn"/> and only takes effect while the mic is already on.
+    ///
+    /// The backend is the source of truth for whether the mic is actually open.
+    /// <see cref="_awakeInGemini"/> only remembers the last state the backend
+    /// reported, so the click inverts that rather than guessing. Painting happens
+    /// in the status handler, which means the idle timeout and go_to_sleep land on
+    /// the UI immediately instead of waiting for a click to resync it.
+    /// </summary>
     private void ToggleAwake()
     {
         _lastInteraction = DateTime.UtcNow;
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (_geminiMode && _gemini.IsConnected)
+            if (!_gemini.IsConnected || _gemini.State == "connecting")
             {
-                _awakeInGemini = !_awakeInGemini;
-                SetMicVisual(_awakeInGemini);
-                AddMessage("system", _awakeInGemini
-                    ? "AWAKE — I'm listening (one command per wake)."
-                    : "ASLEEP — press the mic or say \u201cHey Ultron\u201d to wake me.");
-                _ = _gemini.SetAwakeAsync(_awakeInGemini);
+                // Speech is cloud-only, so there is no local gate to flip. Say so
+                // rather than pretending: a toggle that silently does nothing is
+                // exactly the failure that made the wake control untrustworthy.
+                // "connecting" counts as not-ready on purpose — the process is up
+                // but no Gemini session is attached yet, so flipping the gate now
+                // would paint red while nothing is listening.
+                AddMessage("system", _gemini.IsConnected
+                    ? "Gemini Live is still connecting — the mic toggle does nothing until the session is live."
+                    : "Gemini Live is not connected — speech is unavailable. Reconnecting; you can type meanwhile.");
+                SetMicToggleVisual(false);
+                SetMicVisual(false);
                 return;
             }
-            if (_voiceId.OwnerEnrolled && _settings.VoiceEnrolled &&
-                _sm.Current is AssistantState.Sleep or AssistantState.Rest)
-            {
-                AddMessage("system", "Wake toggle — verifying owner.");
-                StartWakeVerify();
-            }
-            else
-            {
-                AddMessage("system", "Wake toggle — already awake.");
-            }
+            bool next = !_awakeInGemini;
+            // A conversation continues until the mic is turned off, the model is
+            // told to sleep, or the room goes quiet past the idle timeout.
+            AddMessage("system", next
+                ? (_wakeGateOn
+                    ? "Mic on — say \u201cHey Ultron\u201d to start."
+                    : "Mic on — listening.")
+                : "Mic off — only typed messages until you turn it on again.");
+            _ = _gemini.SetAwakeAsync(next);
         });
     }
 

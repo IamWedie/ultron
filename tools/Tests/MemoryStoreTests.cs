@@ -71,19 +71,43 @@ public class MemoryStoreTests
     }
 
     [Fact]
-    public async Task AddAndListFacts_RoundTrips()
+    public async Task ReadLegacyFacts_DoesNotDelete_SoAFailedImportIsRecoverable()
     {
         var db = TempDb();
         try
         {
+            // Rows are inserted directly because the write API was removed when
+            // long_term.json became the only fact store; this is the one-time
+            // migration path for databases that predate that change.
             var store = new MemoryStore(db);
-            await store.AddFactAsync("user prefers dark mode");
-            var facts = await store.ListFactsAsync();
+            SeedLegacyFact(db, "[preferences] favorite_color: blue");
+
+            var read = await store.ReadLegacyFactsAsync();
+            Assert.Single(read);
+            Assert.Contains("favorite_color", read[0]);
+
+            // Reading must not delete. The migration imports into JSON first and
+            // only then clears, so a corrupt JSON file cannot destroy the rows.
+            var reread = await store.ReadLegacyFactsAsync();
+            Assert.Single(reread);
+
+            await store.ClearLegacyFactsAsync();
+            Assert.Empty(await store.ReadLegacyFactsAsync());
             store.Dispose();
-            Assert.Single(facts);
-            Assert.Contains("dark mode", facts[0]);
         }
         finally { Cleanup(db); }
+    }
+
+    private static void SeedLegacyFact(string db, string fact)
+    {
+        using var seed = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = db }.ToString());
+        seed.Open();
+        using var cmd = seed.CreateCommand();
+        cmd.CommandText = "INSERT INTO facts (ts, topic, fact, user) VALUES ($ts,'preferences',$fact,'')";
+        cmd.Parameters.AddWithValue("$ts", "2026-01-01 00:00:00");
+        cmd.Parameters.AddWithValue("$fact", fact);
+        cmd.ExecuteNonQuery();
     }
 
     [Fact]
@@ -114,10 +138,8 @@ public class MemoryStoreTests
         {
             var store = new MemoryStore(db);
             await store.LogAsync("user", "x");
-            await store.AddFactAsync("fact");
             await store.PurgeAllAsync();
             Assert.Empty(await store.RecentConversationsAsync(10));
-            Assert.Empty(await store.ListFactsAsync());
             store.Dispose();
         }
         finally { Cleanup(db); }

@@ -3,6 +3,7 @@
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Windowing;
 using Ultron.Services;
 using Ultron.Services.Apps;
@@ -43,7 +44,6 @@ public sealed partial class MainWindow
         var (fill, stroke, label, dot, ticker) = st switch
         {
             AssistantState.Sleep => ("#1AFF2E2E", "#66FF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY"),
-            AssistantState.WakeListening => ("#33FFB703", "#FFFFB703", "WAKE LISTEN", "#FFFFB703", "CORE STATUS: WAKE LISTEN"),
             AssistantState.Engaged => ("#66FF2E2E", "#FFFF2E2E", "ENGAGED", "#FFFF2E2E", "CORE STATUS: ENGAGED"),
             AssistantState.Rest => ("#22FF2E2E", "#AAFF2E2E", "REST", "#AAFF2E2E", "CORE STATUS: REST"),
             _ => ("#1AFF2E2E", "#66FF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY"),
@@ -62,6 +62,25 @@ public sealed partial class MainWindow
             MicButton.Foreground = busy
                 ? BrushFromHex("#FFFF2E2E")
                 : new SolidColorBrush(Windows.UI.Color.FromArgb(255, 201, 206, 214));
+        });
+    }
+
+    /// <summary>Paints the mic toggle so its state is readable at a glance:
+    /// red when the mic is streaming, grey when it is shut. The old build had no
+    /// visual link between the button and the mic, which is part of why "the
+    /// toggle does nothing" was so hard to see from the outside. Only ever called
+    /// from the backend status handler, so the paint cannot claim a state the
+    /// backend has not reported.</summary>
+    private void SetMicToggleVisual(bool micOpen)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            MicToggleButton.Foreground = micOpen
+                ? BrushFromHex("#FFFF2E2E")
+                : BrushFromHex("#FF6B7078");
+            ToolTipService.SetToolTip(MicToggleButton, micOpen
+                ? "Microphone is open. Click to close it."
+                : "Microphone is closed. Click to open it.");
         });
     }
 

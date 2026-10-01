@@ -82,13 +82,18 @@ public sealed class GeminiBackend : IDisposable
 
     public event Action<string>? BackendInfoReceived; // "version vX — cap1, cap2"
 
-    public async Task StartAsync(string apiKey, string voice = "Charon")
+    /// <param name="wakeGate">
+    /// Passed at launch so the first Gemini session is built with the wake gate
+    /// already in its system prompt. The system prompt is immutable for a
+    /// session's lifetime, so changing this after start costs a reconnect.
+    /// </param>
+    public async Task StartAsync(string apiKey, string voice = "Charon", bool wakeGate = false)
     {
         Process? process;
         await _lifecycleGate.WaitAsync();
         try
         {
-            process = await StartProcessCoreAsync(apiKey, voice);
+            process = await StartProcessCoreAsync(apiKey, voice, wakeGate);
         }
         finally
         {
@@ -98,7 +103,7 @@ public sealed class GeminiBackend : IDisposable
             await WaitForHandshakeAsync(process);
     }
 
-    private async Task<Process?> StartProcessCoreAsync(string apiKey, string voice = "Charon")
+    private async Task<Process?> StartProcessCoreAsync(string apiKey, string voice = "Charon", bool wakeGate = false)
     {
         if (_proc is { HasExited: false })
         {
@@ -137,6 +142,7 @@ public sealed class GeminiBackend : IDisposable
         };
         psi.Environment["GEMINI_API_KEY"] = apiKey;
         psi.Environment["ULTRON_VOICE"] = voice;
+        psi.Environment["ULTRON_WAKE_GATE"] = wakeGate ? "1" : "0";
         psi.Environment["ULTRON_TELEGRAM_API_ID"] = TelegramOptions?.ApiId ?? "";
         psi.Environment["ULTRON_TELEGRAM_API_HASH"] = TelegramOptions?.ApiHash ?? "";
         psi.Environment["ULTRON_TELEGRAM_TARGET"] = TelegramOptions?.Target ?? "";
@@ -279,6 +285,14 @@ public sealed class GeminiBackend : IDisposable
     public async Task SetWakeEnabledAsync(bool enabled)
     {
         await SendAsync(new { type = "set_wake", enabled });
+    }
+
+    /// <summary>Mirror the C#-side privacy switch to the backend so it stops
+    /// injecting long_term.json into the system prompt. The backend has no access
+    /// to config.dat, so it cannot know the setting on its own.</summary>
+    public async Task SetMemoryLoggingAsync(bool enabled)
+    {
+        await SendAsync(new { type = "set_memory_logging", enabled });
     }
 
     public async Task SendVoiceDspAsync(bool enabled, double semitones, double chorus, double bass, double darken)

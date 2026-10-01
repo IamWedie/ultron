@@ -18,8 +18,10 @@ public sealed class AppSettings
     public List<string> FallbackModels { get; set; } = [];
     public string GeminiVoice { get; set; } = "Charon";
     public string PinHash { get; set; } = "";
-    public bool VoiceEnrolled { get; set; }
-    public string VoiceProfile { get; set; } = "";
+    /// <summary>Arms the cloud wake gate: Gemini stays silent until the user says
+    /// the wake phrase. This appends an instruction to the Gemini system prompt;
+    /// it is not a local acoustic detector. Seeded into the backend at launch via
+    /// the ULTRON_WAKE_GATE env var.</summary>
     public bool WakeWordEnabled { get; set; } = true;
 
     // Ultron voice processor applied to every Gemini response.
@@ -34,17 +36,23 @@ public sealed class AppSettings
     public string HotkeyPtt { get; set; } = "Win+Alt+P";
     public string HotkeyMute { get; set; } = "Win+Alt+U";
     public string HotkeyWake { get; set; } = "Win+Alt+L";
-    public string WakePhrases { get; set; } = "Hey Ultron;Yo Ultron;Morning Ultron";
     public string PhoneAddr { get; set; } = "";
     public int PhonePort { get; set; } = 5555;
     public string PhoneSerial { get; set; } = "";
     public string PhonePin { get; set; } = "";
     public string Number { get; set; } = "";
     public int EngagedTimeoutSeconds { get; set; } = 120;
-    public int WakeListeningTimeoutSeconds { get; set; } = 10;
 
-    // Privacy: conversations are logged to memory.db only while this is true.
+    // Privacy switch. While false, ULTRON writes nothing to either memory store
+    // and injects nothing into the Gemini system prompt: no conversation
+    // transcript in memory.db, no facts in long_term.json, no model-authored
+    // memories. Reading what is already stored is also refused, so turning the
+    // toggle off is a complete stop rather than a write-only mute.
     public bool MemoryLogging { get; set; } = true;
+
+    // One-shot marker for the migration of the retired SQLite fact log into
+    // long_term.json. Set once the legacy rows have been imported and dropped.
+    public bool MemoryFactsMigrated { get; set; }
 
     // Redact API keys/tokens before any text is written to the local memory store.
     public bool MemoryRedactSecrets { get; set; } = true;

@@ -14,14 +14,18 @@ public sealed class ApprovalRequest
 public sealed class Brain : IDisposable
 {
     private readonly MemoryStore _memory;
+    private readonly LongTermMemory _facts;
+    private readonly AppSettings _settings;
     private readonly List<ChatMessage> _history = new();
     private readonly SemaphoreSlim _roundGate = new(1, 1);
 
     public event Action<ApprovalRequest>? ApprovalRequested;
 
-    public Brain(AppSettings settings, MemoryStore memory)
+    public Brain(AppSettings settings, MemoryStore memory, LongTermMemory facts)
     {
+        _settings = settings;
         _memory = memory;
+        _facts = facts;
     }
 
     public void ResetHistory() => _history.Clear();
@@ -30,14 +34,15 @@ public sealed class Brain : IDisposable
 
     private async Task<string> MemoryContextAsync(string userText, string? speaker)
     {
+        if (!_settings.MemoryLogging) return "";
         try
         {
             var parts = new List<string>();
-            var facts = await _memory.ListFactsAsync();
-            var q = userText.ToLowerInvariant();
-            var matches = facts.Where(f => f.Contains(q, StringComparison.OrdinalIgnoreCase)).Take(10).ToList();
+            // Facts come from the canonical store, ranked by the same scorer the
+            // model tool uses, so a fallback reply sees the same memory Gemini does.
+            var matches = _facts.Recall(userText, 10);
             if (matches.Count > 0)
-                parts.Add("Known facts:\n" + string.Join("\n", matches.Select(f => $"- {f}")));
+                parts.Add("Known facts:\n" + string.Join("\n", matches.Select(f => $"- [{f.Category}] {f.Key}: {f.Value}")));
             var recent = await _memory.RecentConversationsAsync(10);
             if (recent.Count > 0)
                 parts.Add("Recent conversation:\n" + string.Join("\n", recent.Select(r => $"{r.Role}: {r.Text[..Math.Min(160, r.Text.Length)]}")));
@@ -77,13 +82,13 @@ public sealed class Brain : IDisposable
                 case "remember_fact":
                 {
                     var fact = json?["fact"]?.GetValue<string>() ?? "";
-                    await _memory.AddFactAsync(fact);
+                    _facts.Upsert("notes", fact[..Math.Min(80, fact.Length)], fact);
                     return "Fact remembered.";
                 }
                 case "recall_memories":
                 {
                     var query = json?["query"]?.GetValue<string>() ?? "";
-                    return await RecallMemoryAsync(query);
+                    return RecallMemory(query);
                 }
                 default:
                     return "Tool not available in local mode.";
@@ -95,14 +100,13 @@ public sealed class Brain : IDisposable
         }
     }
 
-    private async Task<string> RecallMemoryAsync(string query)
+    private string RecallMemory(string query)
     {
-        var ql = query.ToLowerInvariant();
-        var facts = (await _memory.ListFactsAsync()).Where(f => f.Contains(ql, StringComparison.OrdinalIgnoreCase)).ToList();
-        var convs = await _memory.SearchConversationsAsync(query, 5);
+        if (!_settings.MemoryLogging) return "Memory logging is turned off.";
+        var hits = _facts.Recall(query, 8);
         var parts = new List<string>();
-        if (facts.Count > 0) parts.Add("Facts:\n" + string.Join("\n", facts.Select(f => $"- {f}")));
-        if (convs.Count > 0) parts.Add("Past conversation:\n" + string.Join("\n", convs.Select(c => $"[{c.Ts}] {c.Role}: {c.Text[..Math.Min(200, c.Text.Length)]}")));
+        if (hits.Count > 0)
+            parts.Add("Facts:\n" + string.Join("\n", hits.Select(f => $"- [{f.Category}] {f.Key}: {f.Value}")));
         if (parts.Count == 0) return "Nothing found in memory about that.";
         return string.Join("\n", parts);
     }

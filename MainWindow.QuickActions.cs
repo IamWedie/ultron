@@ -41,16 +41,11 @@ public sealed partial class MainWindow
                 AddMessage("system", "Purge Cache: history cleared.");
                 break;
             case "wake":
-                if (_voiceId.OwnerEnrolled && _settings.VoiceEnrolled)
-                {
-                    AddMessage("system", "Wake simulated — verifying owner.");
-                    StartWakeVerify();
-                }
-                else
-                {
-                    AddMessage("system", "No voice profile yet — opening VOICE ID SETUP.");
-                    _ = OpenVoiceSetupAsync();
-                }
+                // The microphone gate, not a wake-word toggle — the wake phrase
+                // is a separate policy flag set in Settings. Delegating to
+                // ToggleAwake keeps one implementation, so the button and the
+                // mic can never disagree.
+                ToggleAwake();
                 break;
             case "lock":
                 _sm.ForceSleep();

@@ -15,6 +15,7 @@
     <Compile Include="..\..\Services\AppLog.cs" />
     <Compile Include="..\..\Services\Secrets.cs" />
     <Compile Include="..\..\Services\MemoryStore.cs" />
+    <Compile Include="..\..\Services\LongTermMemory.cs" />
     <Compile Include="..\..\Services\GeminiBackend.cs" />
     <Compile Include="..\..\Services\Outreach.cs" />
     <Compile Include="..\..\Services\UltronOptions.cs" />

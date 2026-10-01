@@ -19,11 +19,14 @@ public sealed class ModelRepo
 
     public bool Has(string key) => File.Exists(PathFor(key)) && new FileInfo(PathFor(key)).Length > 0;
 
+    /// <remarks>
+/// Speech recognition and synthesis are cloud-only (Gemini Live), so the local
+/// model set is a single signal gate. silero-vad.onnx is downloaded here and
+/// consumed by the Python backend's VADGate, which decides whether a frame is
+/// worth sending to the cloud. It performs no recognition.
+/// </remarks>
     private static readonly Dictionary<string, string> Sources = new()
     {
-        ["whisper-encoder.onnx"] = "https://huggingface.co/onnx-community/whisper-tiny.en/resolve/main/onnx/encoder_model_quantized.onnx",
-        ["whisper-decoder.onnx"] = "https://huggingface.co/onnx-community/whisper-tiny.en/resolve/main/onnx/decoder_model_merged_quantized.onnx",
-        ["whisper-tokenizer.json"] = "https://huggingface.co/onnx-community/whisper-tiny.en/resolve/main/tokenizer.json",
         ["silero-vad.onnx"] = "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx",
     };
 

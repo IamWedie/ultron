@@ -37,19 +37,12 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     private DateTime _lastInteraction = DateTime.UtcNow;
     private readonly AppSettings _settings;
     internal readonly MemoryStore _memory;
+    internal readonly LongTermMemory _facts;
     internal readonly Brain _brain;
     internal readonly Outreach _outreach;
     internal readonly AssistantStateMachine _sm;
     internal readonly SystemTelemetry _telemetry = new();
-    internal AudioCapture? _audio;
-    internal readonly VoiceId _voiceId = new();
-    private readonly object _verifyLock = new();
-    private readonly DispatcherTimer _verifyWatch = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly System.Collections.Generic.Queue<double> _spark = new();
-    private List<float>? _verifyBuffer;
-    private List<float>? _captureSink;
-    private DateTime _verifyStart;
-    private int _silentTicks;
 
     internal readonly ModelRepo _repo;
     internal readonly GeminiBackend _gemini;
@@ -57,20 +50,16 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     internal StackPanel? _tgCodePanel;
     internal TextBox? _tgCodeBox;
     internal volatile bool _geminiMode;
+    /// <summary>Last mic state the backend reported (true = streaming). Never
+    /// assumed on click: the click inverts this, and the paint happens in the
+    /// status handler when the backend confirms.</summary>
     internal bool _awakeInGemini = true;
+    /// <summary>Wake-phrase policy ("answer only after 'Hey Ultron'"). Separate
+    /// from the mic gate above and deliberately not merged: it is baked into the
+    /// Gemini system prompt, so it costs a reconnect to change.</summary>
     internal bool _wakeGateOn;
     private IntPtr _selfHwnd;
     internal IntPtr _lastTargetWindow = IntPtr.Zero;
-    private WhisperStt? _whisper;
-    internal SileroVad? _vad;
-    internal readonly List<float> _vadBuf = new();
-    internal readonly List<float> _speechSeg = new();
-    internal bool _vadSpeaking;
-    internal int _vadSilenceCount;
-    internal const int VadSilenceFrames = 22;
-    internal bool _modelsLoaded;
-    internal readonly ConcurrentQueue<float[]> _sttQueue = new();
-    internal bool _sttPumping;
 
     private TrayIcon? _tray;
     internal HotkeyService? _hotkeys;
@@ -94,7 +83,9 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         UltronOptions.Set(_settings);
         AppLog.SetVerbosity(_settings.LogLevel);
         _memory = new MemoryStore();
-        _brain = new Brain(_settings, _memory);
+        _facts = new LongTermMemory();
+        MigrateLegacyFacts();
+        _brain = new Brain(_settings, _memory, _facts);
         _outreach = new Outreach(_settings);
         _outreach.RegisterSmsSender((number, text) => _brain.SendSms(number, text));
         _sm = new AssistantStateMachine(_settings);
@@ -206,31 +197,14 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             _tray?.Dispose();
             await _gemini.StopAsync();
             _gemini.Dispose();
-            _audio?.Dispose();
-            _vad?.Dispose();
-            _whisper?.Dispose();
             _memory?.Dispose();
             _sm?.Dispose();
             _brain.Dispose();
             _outreach?.Dispose();
         };
         _sm.StateChanged += OnStateChanged;
-        _sm.MicRequested += () => SetMicVisual(true);
-        _sm.MicSilenced += () => SetMicVisual(false);
         _sm.ListenStarted += () => LogEnqueued("system", "LISTENING — awaiting command.");
         _sm.ListenStopped += () => LogEnqueued("system", "Listening stopped.");
-        _audio = new AudioCapture();
-        _audio.Samples += OnAudioSamples;
-        _audio.Level += OnAudioLevel;
-        _voiceId.WakeSpotted += OnWakeSpotted;
-        _verifyWatch.Tick += (_, _) => CheckVerifyProgress();
-        if (_settings.VoiceEnrolled)
-        {
-            _voiceId.LoadProfile(_settings.VoiceProfile);
-            StartMonitor();
-            AddMessage("system", "VOICE ID: wake-word monitor active.");
-        }
-        SetConfidence(0f);
         _appWindow = AppWindow;
         Title = "ULTRON";
 
@@ -423,25 +397,18 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
     {
         try
         {
-            // Gemini Live does STT+TTS+VAD server-side, so skip heavy local
-            // Whisper/VAD loading unless we have no Gemini key (pure local
-            // mode) or Gemini later drops (lazy fallback in OnGeminiDisconnected).
-            bool localMode = string.IsNullOrEmpty(_settings.GeminiApiKey);
-            Dbg($"LoadModels: start (localMode={localMode})");
-            if (localMode)
-            {
-                await EnsureLocalModels();
-            }
-            else
-            {
-                DispatcherQueue.TryEnqueue(() => TickerText.Text = "CORE STATUS: GEMINI MODE (local STT/TTS skipped)");
-                _ = EnsureVadAsync();
-            }
+            // Speech recognition and synthesis are cloud-only: Gemini Live
+            // transcribes the audio and speaks the reply. The one local model we
+            // still fetch is silero-vad.onnx, which the Python backend uses as a
+            // signal gate so room noise never reaches the cloud.
+            Dbg("LoadModels: start (cloud speech)");
+            DispatcherQueue.TryEnqueue(() => TickerText.Text = "CORE STATUS: GEMINI MODE");
+            _ = EnsureVadAsync();
 
             Dbg("LoadModels: starting Gemini backend");
             _ = Task.Run(async () =>
             {
-                await _gemini.StartAsync(_settings.GeminiApiKey ?? "", _settings.GeminiVoice);
+                await _gemini.StartAsync(_settings.GeminiApiKey ?? "", _settings.GeminiVoice, _settings.WakeWordEnabled);
                 if (_micMuted) await _gemini.SetMicMutedAsync(true);
             });
 
@@ -506,9 +473,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
 
     private static readonly string[] EnvModelKeys =
     [
-        "whisper-encoder.onnx",
-        "whisper-decoder.onnx",
-        "whisper-tokenizer.json",
         "silero-vad.onnx",
     ];
 
@@ -539,47 +503,6 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             catch (Exception ex) { AppLog.Write("MainWindow", $"FindEnvPython shim failed: {ex.Message}", AppLog.Level.Debug); }
         }
         return null;
-    }
-
-    private readonly object _localLoadLock = new();
-    private Task? _localLoadTask;
-    private bool _localModelsRequested;
-
-    private Task EnsureLocalModels()
-    {
-        lock (_localLoadLock)
-        {
-            if (_localModelsRequested && _modelsLoaded) return Task.CompletedTask;
-            if (_localLoadTask is not null) return _localLoadTask;
-            _localModelsRequested = true;
-            _localLoadTask = Task.Run(async () =>
-            {
-                try
-                {
-                    Dbg("LoadModels: ensure local models begin");
-                    DispatcherQueue.TryEnqueue(() => TickerText.Text = "LOADING: fallback AI models...");
-                    await _repo.EnsureAllAsync();
-                    var dir = _repo.Dir;
-                    var whisperTask = Task.Run(() => { var w = new WhisperStt(); w.Load(dir); return w; });
-                    var vadTask = Task.Run(() => new SileroVad(_repo.PathFor("silero-vad.onnx")));
-                    await Task.WhenAll(whisperTask, vadTask);
-                    _whisper = await whisperTask;
-                    _vad = await vadTask;
-                    _modelsLoaded = true;
-                    Dbg("LoadModels: ensure local models done");
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        TickerText.Text = "CORE STATUS: ALL MODELS LOADED";
-                        AddMessage("system", "ONLINE — Whisper STT + Silero VAD ready.");
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Dbg("LoadModels: local load FAILED " + ex);
-                }
-            });
-            return _localLoadTask;
-        }
     }
 
     private static Color Colors2(byte r, byte g, byte b) => Color.FromArgb(255, r, g, b);
@@ -621,7 +544,22 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             ItemsSource = new[] { "Charon", "Puck", "Kore", "Fenrir", "Aoede" },
             SelectedItem = _settings.GeminiVoice,
         };
-        var memoryToggle = new ToggleSwitch { Header = "Store conversations in local memory", IsOn = _settings.MemoryLogging };
+        var memoryToggle = new ToggleSwitch
+        {
+            Header = "Store memory on this PC",
+            IsOn = _settings.MemoryLogging,
+        };
+        // Spelled out under the switch so the scope is unambiguous: this gates
+        // the conversation transcript, model-authored facts and the system prompt.
+        var memoryScopeNote = new TextBlock
+        {
+            Text = "On: transcripts go to memory.db, remembered facts go to long_term.json, "
+                 + "and the model is given your memory. Off: nothing is written and nothing is sent.",
+            FontSize = 11,
+            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)),
+            TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
+            Margin = new Thickness(0, 2, 0, 8),
+        };
         var purgeBtn = new Button { Content = "Purge ALL stored memory now", HorizontalAlignment = HorizontalAlignment.Left };
         purgeBtn.Click += (_, _) =>
         {
@@ -630,7 +568,12 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 try
                 {
                     await _memory.PurgeAllAsync();
-                    DispatcherQueue.TryEnqueue(() => AddMessage("system", "Local memory (conversations + facts) purged."));
+                    _facts.Clear();
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        AddMessage("system", "Local memory purged (conversations + remembered facts).");
+                        RefreshMemory();
+                    });
                 }
                 catch (Exception ex) { Dbg($"purge failed: {ex.Message}"); }
             });
@@ -779,7 +722,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                         Lbl("GLOBAL HOTKEYS (Win / Ctrl / Alt / Shift, plus a key or F1-F12):"),
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Push-to-talk ", 11), pttBox } },
                         new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Mute mic     ", 11), muteBox } },
-                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Wake toggle  ", 11), wakeBox } },
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Mic toggle   ", 11), wakeBox } },
                         Lbl("TELEGRAM VOICE CALLS — real phone calls from the ULTRON account:"),
                         tgToggle,
                         Lbl("api_id (your ULTRON app's id at my.telegram.org):"),
@@ -818,6 +761,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
 
                         Lbl("PRIVACY:"),
                         memoryToggle,
+                        memoryScopeNote,
                         purgeBtn,
                     }
                 },
@@ -870,11 +814,16 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             // The spawn-time env var is frozen for the life of the backend
             // process, so the toggle has to be pushed to the running one.
             _ = _gemini.SendTelegramCallEnabledAsync(tgToggle.IsOn);
+            // The backend cannot read config.dat, so the privacy switch has to be
+            // pushed to the running process every time it changes.
+            _ = _gemini.SetMemoryLoggingAsync(_settings.MemoryLogging);
+            if (!_settings.MemoryLogging)
+                AddMessage("system", "Memory logging off — nothing is written and no memory is sent to the model.");
             if (!string.IsNullOrEmpty(key))
             {
                 var restartBackend = previousKey != _settings.GeminiApiKey || previousVoice != _settings.GeminiVoice;
                 if (restartBackend)
-                    _ = Task.Run(async () => await _gemini.StartAsync(_settings.GeminiApiKey, _settings.GeminiVoice));
+                    _ = Task.Run(async () => await _gemini.StartAsync(_settings.GeminiApiKey, _settings.GeminiVoice, _settings.WakeWordEnabled));
                 AddMessage("system", $"CORE ONLINE — Gemini brain configured (voice: {voiceOptions.SelectedItem?.ToString() ?? "Charon"})");
             }
             else

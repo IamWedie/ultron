@@ -29,117 +29,100 @@ public sealed partial class MainWindow
 {
     /* ===================== MEMORY PANEL ===================== */
 
-    private static string MemoryFilePath =>
-        Path.Combine(AppSettings.DataDir(), "long_term.json");
-
-    private static bool _memoryJsonCorrupt;
-
-    private Dictionary<string, Dictionary<string, object?>> LoadMemoryJson()
+    /// <summary>One-time import of the retired SQLite fact log.
+    ///
+    /// Long-term memory was previously written to two places at once: the model's
+    /// <c>save_memory</c> tool appended to the <c>facts</c> table in memory.db,
+    /// while the Memory panel and the system prompt used long_term.json. Neither
+    /// could see the other's writes. long_term.json is now the only fact store, so
+    /// the leftovers are parsed back into (category, key, value) triples and the
+    /// old table is emptied. Conversations in memory.db are left alone.</summary>
+    private void MigrateLegacyFacts()
     {
+        if (_settings.MemoryFactsMigrated) return;
         try
         {
-            if (File.Exists(MemoryFilePath))
+            // Read, import, and only then clear. Importing before deleting means a
+            // corrupt or unreadable long_term.json cannot destroy the only copy of
+            // these rows: the import throws, the catch below logs it, the marker
+            // stays false, and the next launch retries against intact data.
+            var rows = _memory.ReadLegacyFactsAsync().GetAwaiter().GetResult();
+            if (rows.Count > 0)
             {
-                var root = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(File.ReadAllText(MemoryFilePath));
-                if (root is not null)
+                var parsed = rows.Select(ParseLegacyFact).Where(f => f is not null).Select(f => f!).ToList();
+                var skipped = rows.Count - parsed.Count;
+                _facts.Import(parsed);
+                // Unparseable rows are preserved by archiving them under a
+                // reserved key rather than silently dropped, then the table is
+                // cleared. Worst case the user sees a slightly odd entry in the
+                // Notes category instead of losing text outright.
+                if (skipped > 0)
                 {
-                    _memoryJsonCorrupt = false;
-                    return root;
+                    var archive = string.Join("\n", rows.Where(r => ParseLegacyFact(r) is null));
+                    _facts.Upsert("notes", "_legacy_unparsed", archive);
+                    Dbg($"Memory migration: archived {skipped} unparseable row(s) under notes/_legacy_unparsed");
                 }
+                _memory.ClearLegacyFactsAsync().GetAwaiter().GetResult();
+                Dbg($"Memory migration: imported {parsed.Count} facts into long_term.json");
             }
+            _settings.MemoryFactsMigrated = true;
+            _settings.Save();
         }
-        catch
+        catch (Exception ex)
         {
-            _memoryJsonCorrupt = true;
+            // Never let a failed migration block startup, and never mark it done,
+            // so the next launch tries again.
+            AppLog.Write("MainWindow", $"Legacy fact migration failed: {ex.Message}", AppLog.Level.Warn);
         }
-        return new();
     }
 
-    private static readonly JsonSerializerOptions MemoryJsonOpts = new()
+    /// <summary>Recover structure from a legacy "[category] key: value" row.
+    /// Returns null when the row has no recognisable shape.</summary>
+    private static MemoryFact? ParseLegacyFact(string row)
     {
-        WriteIndented = true,
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
-
-    private void SaveMemoryJson(Dictionary<string, Dictionary<string, object?>> root)
-    {
-        if (_memoryJsonCorrupt)
-            throw new InvalidOperationException("Memory store is corrupt and was not overwritten.");
-        Directory.CreateDirectory(Path.GetDirectoryName(MemoryFilePath)!);
-        var temporary = MemoryFilePath + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(root, MemoryJsonOpts));
-        File.Move(temporary, MemoryFilePath, true);
-    }
-
-    private string RecallFromMemoryJson(string query)
-    {
-        var root = LoadMemoryJson();
-        var q = query ?? "";
-        var results = new List<string>();
-        foreach (var (cat, entries) in root)
+        row = row.Trim();
+        if (row.Length == 0) return null;
+        var category = "notes";
+        var body = row;
+        if (row.StartsWith('['))
         {
-            if (entries is null) continue;
-            foreach (var (key, val) in entries)
+            var close = row.IndexOf(']');
+            if (close > 1)
             {
-                var value = val is Dictionary<string, object?> d && d.TryGetValue("value", out var v) ? v?.ToString() : val?.ToString();
-                value ??= "";
-                if (q.Length == 0 ||
-                    cat.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                    key.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                    value.Contains(q, StringComparison.OrdinalIgnoreCase))
-                    results.Add($"[{cat}] {key}: {value}");
+                category = row[1..close].Trim();
+                body = row[(close + 1)..].TrimStart();
             }
         }
-        return results.Count > 0 ? string.Join("\n", results.Take(8)) : "Nothing found in memory.";
+        var colon = body.IndexOf(':');
+        var key = colon > 0 ? body[..colon].Trim() : body.Trim();
+        var value = colon > 0 ? body[(colon + 1)..].Trim() : "";
+        if (key.Length == 0) return null;
+        if (key.Length > LongTermMemory.MaxKeyLength) key = key[..LongTermMemory.MaxKeyLength];
+        if (category.Length == 0 || category.Length > LongTermMemory.MaxCategoryLength)
+            category = category[..Math.Min(category.Length, LongTermMemory.MaxCategoryLength)];
+        return new MemoryFact(category, key, value, "");
     }
 
-    private sealed class MemEntry
-    {
-        public required string Category { get; init; }
-        public required string Key { get; init; }
-        public string? Value { get; set; }
-        public string? Updated { get; init; }
-    }
-
-    private List<MemEntry> _memCache = new();
+    /// <summary>Rows currently shown, projected from the canonical store.
+    /// All mutation goes through <c>_facts</c>; this list is only a view.</summary>
+    private List<MemoryFact> _memCache = new();
 
     private void RefreshMemory()
     {
-        _memCache = LoadMemory();
+        _facts.Reload();
+        _memCache = _facts.Entries();
+        UpdateMemoryCorruptBanner();
         FilterMemory();
     }
 
-    private List<MemEntry> LoadMemory()
+    private void UpdateMemoryCorruptBanner()
     {
-        var list = new List<MemEntry>();
-        try
-        {
-            if (!File.Exists(MemoryFilePath)) return list;
-            var root = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, JsonElement>>>(File.ReadAllText(MemoryFilePath));
-            if (root is null) return list;
-            foreach (var (cat, entries) in root)
-            {
-                foreach (var (key, el) in entries)
-                {
-                    string? val = null, upd = null;
-                    if (el.ValueKind == JsonValueKind.Object)
-                    {
-                        val = el.GetProperty("value").GetString();
-                        upd = el.TryGetProperty("updated", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null;
-                    }
-                    else if (el.ValueKind == JsonValueKind.String)
-                    {
-                        val = el.GetString();
-                    }
-                    list.Add(new MemEntry { Category = cat, Key = key, Value = val, Updated = upd });
-                }
-            }
-            list.Sort((a, b) => string.Compare(a.Category, b.Category, StringComparison.OrdinalIgnoreCase) == 0
-                ? string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase)
-                : string.Compare(a.Category, b.Category, StringComparison.OrdinalIgnoreCase));
-        }
-        catch (Exception ex) { AppLog.Write("MainWindow", $"LoadMemory failed: {ex.Message}", AppLog.Level.Error); }
-        return list;
+        if (MemoryCorruptHint is null) return;
+        var corrupt = _facts.IsCorrupt;
+        MemoryCorruptHint.Visibility = corrupt ? Visibility.Visible : Visibility.Collapsed;
+        if (!corrupt) return;
+        MemoryCorruptHint.Visibility = Visibility.Visible;
+        MemoryCorruptHint.IsTapEnabled = true;
     }
 
     private void FilterMemory()
@@ -174,7 +157,7 @@ public sealed partial class MainWindow
         MemoryHint.Visibility = _memCache.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private Microsoft.UI.Xaml.Controls.StackPanel BuildMemoryRow(MemEntry m)
+    private Microsoft.UI.Xaml.Controls.StackPanel BuildMemoryRow(MemoryFact m)
     {
         var row = new Microsoft.UI.Xaml.Controls.StackPanel { Spacing = 2, Margin = new Thickness(0, 0, 0, 6) };
         var head = new Microsoft.UI.Xaml.Controls.StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -231,31 +214,36 @@ public sealed partial class MainWindow
         return row;
     }
 
-    private void SaveMemory()
+    /// <summary>Wrap a store write so a refused write (corrupt file, or memory
+    /// logging switched off) surfaces in the transcript instead of failing
+    /// silently, which is how the old panel lost data.
+    ///
+    /// The MemoryLogging check has to live here because this is the single choke
+    /// point for every panel mutation. The model-side handlers are gated in their
+    /// own file, but the panel writes bypassed that check entirely, so a setting
+    /// that claims "nothing is written while off" was not actually true.</summary>
+    private bool TryWrite(Action action, string what)
     {
-        var root = new Dictionary<string, Dictionary<string, object>>();
-        foreach (var m in _memCache)
+        if (!_settings.MemoryLogging)
         {
-            if (!root.TryGetValue(m.Category, out var cat))
-            {
-                cat = new Dictionary<string, object>();
-                root[m.Category] = cat;
-            }
-            cat[m.Key] = new Dictionary<string, object?>
-            {
-                ["value"] = m.Value ?? "",
-                ["updated"] = m.Updated ?? DateTime.Now.ToString("yyyy-MM-dd"),
-            };
+            AddMessage("system", $"Memory logging is off — {what} refused. Nothing is written while it is off.");
+            return false;
         }
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(MemoryFilePath)!);
-            File.WriteAllText(MemoryFilePath, JsonSerializer.Serialize(root, MemoryJsonOpts));
+            action();
+            RefreshMemory();
+            return true;
         }
-        catch (Exception ex) { AppLog.Write("MainWindow", $"SaveMemoryJson failed: {ex.Message}", AppLog.Level.Error); }
+        catch (InvalidOperationException ex)
+        {
+            AppLog.Write("MainWindow", $"{what} refused: {ex.Message}", AppLog.Level.Warn);
+            AddMessage("system", "Memory not changed — " + ex.Message);
+            return false;
+        }
     }
 
-    private async Task EditMemoryAsync(MemEntry m)
+    private async Task EditMemoryAsync(MemoryFact m)
     {
         var box = new TextBox
         {
@@ -274,19 +262,11 @@ public sealed partial class MainWindow
             XamlRoot = Content.XamlRoot,
         };
         if (await dlg.ShowAsync() == ContentDialogResult.Primary)
-        {
-            m.Value = box.Text;
-            SaveMemory();
-            FilterMemory();
-        }
+            TryWrite(() => _facts.Upsert(m.Category, m.Key, box.Text), "edit memory");
     }
 
-    private void DeleteMemory(MemEntry m)
-    {
-        _memCache.RemoveAll(x => x.Category == m.Category && x.Key == m.Key);
-        SaveMemory();
-        FilterMemory();
-    }
+    private void DeleteMemory(MemoryFact m) =>
+        TryWrite(() => _facts.Delete(m.Category, m.Key), "delete memory");
 
     private void MemorySearch_TextChanged(object sender, TextChangedEventArgs e) => FilterMemory();
 
@@ -294,11 +274,34 @@ public sealed partial class MainWindow
 
     private async void MemoryAdd_Click(object sender, RoutedEventArgs e)
     {
-        var catBox = new TextBox { PlaceholderText = "category (e.g. preferences)", Margin = new Thickness(0, 8, 0, 0) };
-        var keyBox = new TextBox { PlaceholderText = "key (e.g. favorite_color)", Margin = new Thickness(0, 8, 0, 0) };
-        var valBox = new TextBox { PlaceholderText = "value", AcceptsReturn = true, MinHeight = 80, Margin = new Thickness(0, 8, 0, 0) };
+        var catBox = new TextBox
+        {
+            PlaceholderText = "category (e.g. preferences)",
+            Margin = new Thickness(0, 8, 0, 0),
+            MaxLength = LongTermMemory.MaxCategoryLength,
+        };
+        var keyBox = new TextBox
+        {
+            PlaceholderText = "key (e.g. favorite_color)",
+            Margin = new Thickness(0, 8, 0, 0),
+            MaxLength = LongTermMemory.MaxKeyLength,
+        };
+        var valBox = new TextBox
+        {
+            PlaceholderText = "value",
+            AcceptsReturn = true,
+            MinHeight = 80,
+            Margin = new Thickness(0, 8, 0, 0),
+            MaxLength = LongTermMemory.MaxValueLength,
+        };
         var panel = new Microsoft.UI.Xaml.Controls.StackPanel();
-        panel.Children.Add(new TextBlock { Text = "Category (identity, preferences, projects, relationships, wishes, notes, ...)", FontSize = 11, Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)) });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Category (identity, preferences, projects, relationships, wishes, notes, or your own)",
+            FontSize = 11,
+            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 155, 161, 171)),
+            TextWrapping = TextWrapping.Wrap,
+        });
         panel.Children.Add(catBox);
         panel.Children.Add(keyBox);
         panel.Children.Add(valBox);
@@ -310,21 +313,65 @@ public sealed partial class MainWindow
             CloseButtonText = "Cancel",
             XamlRoot = Content.XamlRoot,
         };
-        if (await dlg.ShowAsync() == ContentDialogResult.Primary &&
-            !string.IsNullOrWhiteSpace(catBox.Text) && !string.IsNullOrWhiteSpace(keyBox.Text))
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        if (string.IsNullOrWhiteSpace(catBox.Text) || string.IsNullOrWhiteSpace(keyBox.Text))
         {
-            _memCache.RemoveAll(x => x.Category == catBox.Text.Trim() && x.Key == keyBox.Text.Trim());
-            _memCache.Add(new MemEntry { Category = catBox.Text.Trim(), Key = keyBox.Text.Trim(), Value = valBox.Text, Updated = DateTime.Now.ToString("yyyy-MM-dd") });
-            SaveMemory();
+            AddMessage("system", "Add memory needs both a category and a key.");
+            return;
+        }
+        // Upsert, so re-adding an existing (category, key) replaces it instead of
+        // silently creating a second copy.
+        TryWrite(() => _facts.Upsert(catBox.Text, keyBox.Text, valBox.Text), "add memory");
+    }
+
+    private async void MemoryClear_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new ContentDialog
+        {
+            Title = "Delete all memory?",
+            Content = new TextBlock
+            {
+                Text = "This permanently removes every stored fact. Conversation history in memory.db is not affected.",
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = "Delete everything",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = Content.XamlRoot,
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        TryWrite(_facts.Clear, "clear memory");
+    }
+
+    /// <summary>Only path that ever replaces an unparseable store, and only after
+    /// the user confirms. The old file is kept alongside as <c>.corrupt-&lt;ts&gt;</c>.</summary>
+    private async void MemoryDiscardCorrupt_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new ContentDialog
+        {
+            Title = "Memory file unreadable",
+            Content = new TextBlock
+            {
+                Text = $"{_facts.FilePath} could not be parsed, so ULTRON has not written to it. " +
+                       "Discard it to start a fresh, empty memory? The unreadable file is kept as a backup.",
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = "Discard and reset",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = Content.XamlRoot,
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            _facts.DiscardAndReset();
+            AddMessage("system", "Memory store reset. The previous file was kept as a .corrupt backup.");
             RefreshMemory();
         }
+        catch (Exception ex)
+        {
+            AppLog.Write("MainWindow", "Discard memory failed: " + ex.Message, AppLog.Level.Error);
+            AddMessage("system", "Could not reset memory: " + ex.Message);
+        }
     }
-
-    private void MemoryClear_Click(object sender, RoutedEventArgs e)
-    {
-        _memCache.Clear();
-        SaveMemory();
-        RefreshMemory();
-    }
-
 }

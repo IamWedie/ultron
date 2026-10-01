@@ -41,6 +41,10 @@ public sealed partial class MainWindow
                     // respawned backend is a fresh process, so it only knows the
                     // spawn-time environment value, not the current toggle.
                     _ = _gemini.SendTelegramCallEnabledAsync(_settings.TelegramCallEnabled);
+                    // The backend has no access to config.dat, so re-assert the
+                    // privacy switch on every connect: a respawned backend is a
+                    // fresh process and would otherwise inject memory by default.
+                    _ = _gemini.SetMemoryLoggingAsync(_settings.MemoryLogging);
                     // Apply the persisted Ultron voice profile on every connect.
                     _ = _gemini.SendVoiceDspAsync(
                         _settings.VoiceDspEnabled,
@@ -48,41 +52,68 @@ public sealed partial class MainWindow
                         _settings.VoiceDspChorus,
                         _settings.VoiceDspBass,
                         _settings.VoiceDspDarken);
-                    // Wake gate: active only when the user enrolled a wake
-                    // phrase AND the setting is on. If armed, start asleep and
-                    // keep the local mic running purely as the "Hey Ultron"
-                    // detector; the Python backend mutes itself while asleep.
-                    _wakeGateOn = _settings.WakeWordEnabled && _voiceId.WakeEnrolled;
-                    _awakeInGemini = !_wakeGateOn;
-                    _ = _gemini.SetWakeEnabledAsync(_wakeGateOn);
+                    // The wake gate is now a system-prompt instruction inside the
+                    // Gemini session, baked in at launch from WakeWordEnabled
+                    // (see GeminiBackend.StartAsync). It no longer needs a local
+                    // enrolled voice to decide, so there is no "start asleep"
+                    // state: the mic opens and the model simply stays quiet
+                    // until the user says the wake phrase. If the gate is off,
+                    // the model answers speech straight away.
+                    //
+                    // Two separate things, deliberately not merged:
+                    //   _wakeGateOn  - policy. "Answer only after 'Hey Ultron'."
+                    //                   Lives in the session's system prompt, so
+                    //                   changing it later costs a reconnect.
+                    //   _awakeInGemini - runtime. "Is mic audio streaming right
+                    //                   now?" Owned by the backend; the UI only
+                    //                   remembers what the backend last reported.
+                    // The backend opens the mic by default on a fresh session.
+                    _wakeGateOn = _settings.WakeWordEnabled;
+                    _awakeInGemini = true;
                     if (_wakeGateOn)
                     {
-                        TickerText.Text = "CORE STATUS: ASLEEP — say \"Hey Ultron\"";
-                        AddMessage("system", "Wake gate armed — say \"Hey Ultron\" to talk to me.");
-                        SetMicVisual(false);
-                        StartMonitor();
-                        _ = _gemini.SetAwakeAsync(false);
+                        TickerText.Text = "CORE STATUS: MIC ON — say \"Hey Ultron\" when ready";
+                        AddMessage("system", "Gemini Live connected. Mic is open. Say \"Hey Ultron\" to start, then keep talking as long as you like.");
                     }
                     else
                     {
                         TickerText.Text = "CORE STATUS: GEMINI LIVE CONNECTED";
-                        AddMessage("system", "Gemini Live API connected — real-time voice active.");
-                        StopLocalMic();
-                        _ = _gemini.SetAwakeAsync(true);
+                        AddMessage("system", "Gemini Live API connected — real-time voice active, no wake phrase needed.");
                     }
+                    SetMicVisual(_awakeInGemini);
+                    SetMicToggleVisual(_awakeInGemini);
+                    // No local capture start here. The C# microphone pipeline is
+                    // deleted; the Python backend owns the only audio input.
                     break;
                 case "connecting":
+                    // The process is up but no Gemini session is attached yet, so
+                    // the mic is not streaming even though _awake defaults to true
+                    // inside the backend. Grey the toggle so it never claims to be
+                    // listening during this window; ToggleAwake also rejects clicks
+                    // while we are here.
                     TickerText.Text = "CORE STATUS: CONNECTING TO GEMINI...";
+                    SetMicVisual(false);
+                    SetMicToggleVisual(false);
                     break;
                 case "awake":
                     _awakeInGemini = true;
                     TickerText.Text = "CORE STATUS: LISTENING";
                     SetMicVisual(true);
+                    SetMicToggleVisual(true);
                     break;
                 case "asleep":
+                    // Explicit sleep: the model was told to sleep, the room went
+                    // quiet past the idle timeout, or the user flipped the mic off.
+                    // The mic is shut, so the wake phrase cannot be heard either —
+                    // the honest instruction is to turn the mic back on. Mentioning
+                    // "Hey Ultron" here was the confusing part: it tells the user to
+                    // speak into a microphone that is closed.
                     _awakeInGemini = false;
-                    TickerText.Text = "CORE STATUS: ASLEEP — say \"Hey Ultron\"";
+                    TickerText.Text = _wakeGateOn
+                        ? "CORE STATUS: MIC OFF — turn the mic toggle on, then say \"Hey Ultron\""
+                        : "CORE STATUS: MIC OFF — turn the mic toggle on to listen";
                     SetMicVisual(false);
+                    SetMicToggleVisual(false);
                     break;
                 case "listening":
                     TickerText.Text = "CORE STATUS: LISTENING";
@@ -95,34 +126,15 @@ public sealed partial class MainWindow
                     _awakeInGemini = true;
                     _wakeGateOn = false;
                     SetMicVisual(false);
+                    SetMicToggleVisual(false);
                     TickerText.Text = "CORE STATUS: GEMINI DISCONNECTED";
-                    // Fall back to local STT/TTS pipeline (loads models lazily if skipped).
-                    _ = EnsureLocalModels();
-                    ResumeLocalMic();
+                    // No local fallback to switch to: speech is cloud-only. The
+                    // backend supervisor reconnects on its own, and typed input
+                    // still works in the meantime.
+                    AddMessage("system", "Gemini Live disconnected — no local speech fallback exists. Reconnecting; typing still works.");
                     break;
             }
         });
-    }
-
-    private void StopLocalMic()
-    {
-        try
-        {
-            _audio?.Stop();
-            _verifyWatch.Stop();
-            lock (_verifyLock) _verifyBuffer = null;
-        }
-        catch (Exception ex) { AppLog.Write("MainWindow", $"StopLocalMic failed: {ex.Message}", AppLog.Level.Warn); }
-    }
-
-    private void ResumeLocalMic()
-    {
-        try
-        {
-            if (_voiceId.WakeEnrolled)
-                StartMonitor();
-        }
-        catch (Exception ex) { AppLog.Write("MainWindow", $"ResumeLocalMic failed: {ex.Message}", AppLog.Level.Warn); }
     }
 
     private void OnGeminiTranscript(string role, string text)

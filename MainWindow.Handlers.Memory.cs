@@ -29,73 +29,48 @@ public sealed partial class MainWindow
 {
     private ToolResult HandleSaveMemory(Dictionary<string, object> args)
     {
+        if (!_settings.MemoryLogging)
+            return ToolResult.Ok("Memory logging is off, so nothing was saved. The user can turn it back on in Settings.");
+
         var category = args.GetValueOrDefault("category")?.ToString() ?? "notes";
         var key = args.GetValueOrDefault("key")?.ToString() ?? "";
         var value = args.GetValueOrDefault("value")?.ToString() ?? "";
-        if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value))
             return ToolResult.InvalidArguments("save_memory needs both a 'key' and a 'value'.");
-        
-        // Store in SQLite MemoryStore as a fact with topic = category
-        var factText = $"[{category}] {key}: {value}";
-        _ = Task.Run(async () =>
+
+        try
         {
-            try { await _memory.AddFactAsync(factText, category); }
-            catch (Exception ex) { AppLog.Write("MainWindow", $"AddFactAsync failed: {ex.Message}", AppLog.Level.Error); }
-        });
-        
-        PushUndo($"save_memory([{category}] {key})", () =>
+            var stored = _facts.Upsert(category, key, value);
+            RefreshMemory();
+            return ToolResult.Ok($"Remembered [{stored.Category}] {stored.Key}: {stored.Value}");
+        }
+        catch (InvalidOperationException ex)
         {
-            // Note: MemoryStore doesn't support fact removal by key, so we can't fully undo
-            return "Fact stored in memory (manual removal needed if desired).";
-        });
-        
-        if (_memCache.Count > 0) RefreshMemory();
-        return ToolResult.Ok($"Remembered [{category}] {key}: {value}");
+            // The only expected throw: an unparseable long_term.json, which the
+            // store refuses to overwrite. Report it rather than losing the data.
+            AppLog.Write("MainWindow", "save_memory refused: " + ex.Message, AppLog.Level.Warn);
+            return ToolResult.Fail($"Could not save to memory: {ex.Message}");
+        }
     }
 
     private ToolResult HandleRecallMemory(Dictionary<string, object> args)
     {
-        var query = args.GetValueOrDefault("query")?.ToString() ?? "";
-        
-        // Search both facts and conversations in SQLite MemoryStore
-        var results = new List<string>();
-        
-        // Search facts
-        var factsTask = Task.Run(async () =>
-        {
-            try { return await _memory.ListFactsAsync(); }
-            catch { return new List<string>(); }
-        });
-        
-        // Search conversations
-        var convsTask = Task.Run(async () =>
-        {
-            try { return await _memory.SearchConversationsAsync(query, 6); }
-            catch { return new List<ConversationRow>(); }
-        });
-        
-        Task.WaitAll(factsTask, convsTask);
-        
-        var facts = factsTask.Result;
-        var convs = convsTask.Result;
-        
-        var q = query.ToLowerInvariant();
-        foreach (var f in facts)
-        {
-            if (q.Length == 0 || f.ToLowerInvariant().Contains(q))
-                results.Add($"[fact] {f}");
-        }
-        foreach (var c in convs)
-        {
-            if (q.Length == 0 || c.Text.ToLowerInvariant().Contains(q))
-                results.Add($"[conv] {c.Ts} {c.Role}: {c.Text}");
-        }
-        
-        // An empty recall is a miss, not a success: reporting it as Ok let the model
-        // tell the user what it remembered when it had recalled nothing.
-        return results.Count > 0
-            ? ToolResult.Ok(string.Join("\n", results.Take(8)))
-            : ToolResult.NotFound($"Nothing found in memory for '{query}'.");
-    }
+        if (!_settings.MemoryLogging)
+            return ToolResult.Ok("Memory logging is off, so there is nothing stored to recall.");
 
+        var query = args.GetValueOrDefault("query")?.ToString() ?? "";
+
+        // Same ranked search the Memory panel and the local fallback use, so all
+        // three read paths agree on what "recall" means.
+        var hits = _facts.Recall(query, 8);
+        if (hits.Count == 0)
+        {
+            // An empty recall is a miss, not a success: reporting it as Ok let the
+            // model tell the user what it remembered when it had recalled nothing.
+            return ToolResult.NotFound($"Nothing found in memory for '{query}'.");
+        }
+
+        return ToolResult.Ok(string.Join("\n",
+            hits.Select(f => $"[{f.Category}] {f.Key}: {f.Value}")));
+    }
 }

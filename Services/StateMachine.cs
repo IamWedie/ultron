@@ -3,7 +3,6 @@ namespace Ultron.Services;
 public enum AssistantState
 {
     Sleep,
-    WakeListening,
     Engaged,
     Rest,
 }
@@ -15,19 +14,27 @@ public class StateTransition
     public string Reason { get; init; } = "";
 }
 
+/// <summary>
+/// Tracks whether a conversation is in progress, for the HUD orb and the
+/// inactivity timeout. It is driven by text and by Gemini transcripts.
+///
+/// This used to also model the local wake-word handshake: a WakeListening state
+/// between "wake word heard" and "owner voice verified". That whole path is
+/// gone, because local speaker verification was deleted along with the Whisper
+/// STT pipeline. The wake phrase is now enforced by the Gemini system prompt, so
+/// there is no on-device handshake for this machine to observe. Sleep and
+/// mic-open/closed are owned by the backend's gate, not here.
+/// </summary>
 public class AssistantStateMachine : IDisposable
 {
     private readonly AppSettings _settings;
     private DateTime _engagedSince;
     private DateTime _lastVoiceActivity;
     private System.Threading.Timer? _inactivityTimer;
-    private System.Threading.Timer? _wakeTimer;
 
     public AssistantState Current { get; private set; } = AssistantState.Sleep;
 
     public event Action<StateTransition>? StateChanged;
-    public event Action? MicRequested;
-    public event Action? MicSilenced;
     public event Action? ListenStarted;
     public event Action? ListenStopped;
 
@@ -36,40 +43,6 @@ public class AssistantStateMachine : IDisposable
     public AssistantStateMachine(AppSettings settings)
     {
         _settings = settings;
-    }
-
-    public void WakeDetected()
-    {
-        if (Current == AssistantState.Rest)
-        {
-            Transition(AssistantState.WakeListening, "rest interrupted by wake word");
-            StartWakeTimeout();
-            return;
-        }
-        if (Current != AssistantState.Sleep) return;
-        Transition(AssistantState.WakeListening, "wake word detected");
-        MicRequested?.Invoke();
-        StartWakeTimeout();
-    }
-
-    public void VoiceIdPassed()
-    {
-        if (Current != AssistantState.WakeListening) return;
-        _engagedSince = DateTime.UtcNow;
-        _lastVoiceActivity = DateTime.UtcNow;
-        Transition(AssistantState.Engaged, "voice ID verified");
-        _inactivityTimer?.Dispose();
-        _inactivityTimer = new System.Threading.Timer(OnInactivity, null,
-            TimeSpan.FromSeconds(_settings.EngagedTimeoutSeconds), Timeout.InfiniteTimeSpan);
-        ListenStarted?.Invoke();
-    }
-
-    public void VoiceIdFailed()
-    {
-        if (Current != AssistantState.WakeListening) return;
-        Transition(AssistantState.Sleep, "voice ID rejected — returning to sleep");
-        _wakeTimer?.Dispose();
-        MicSilenced?.Invoke();
     }
 
     public void CommandStarted()
@@ -91,7 +64,6 @@ public class AssistantStateMachine : IDisposable
         if (Current != AssistantState.Engaged) return;
         Transition(AssistantState.Rest, "user issued rest cue");
         ListenStopped?.Invoke();
-        MicSilenced?.Invoke();
         _inactivityTimer?.Dispose();
     }
 
@@ -100,9 +72,7 @@ public class AssistantStateMachine : IDisposable
         if (Current == AssistantState.Sleep) return;
         Transition(AssistantState.Sleep, "forced sleep");
         _inactivityTimer?.Dispose();
-        _wakeTimer?.Dispose();
         ListenStopped?.Invoke();
-        MicSilenced?.Invoke();
     }
 
     public void ResetForNewSession()
@@ -110,6 +80,8 @@ public class AssistantStateMachine : IDisposable
         ForceSleep();
     }
 
+    /// <summary>Mark the session as live. Text no longer passes through a local
+    /// verification step, so this engages directly.</summary>
     public void EngageFromText()
     {
         _lastVoiceActivity = DateTime.UtcNow;
@@ -118,13 +90,9 @@ public class AssistantStateMachine : IDisposable
             ResetInactivityTimer();
             return;
         }
-        _wakeTimer?.Dispose();
         _engagedSince = DateTime.UtcNow;
-        if (Current == AssistantState.Sleep || Current == AssistantState.Rest)
-        {
-            Transition(AssistantState.WakeListening, "text input received while idle");
-        }
-        Transition(AssistantState.Engaged, "text input verified — session active");
+        Transition(AssistantState.Engaged, "text input received — session active");
+        ListenStarted?.Invoke();
         _inactivityTimer?.Dispose();
         _inactivityTimer = new System.Threading.Timer(OnInactivity, null,
             TimeSpan.FromSeconds(_settings.EngagedTimeoutSeconds), Timeout.InfiniteTimeSpan);
@@ -137,24 +105,7 @@ public class AssistantStateMachine : IDisposable
         {
             Transition(AssistantState.Sleep, $"inactivity timeout ({idle:F0}s)");
             ListenStopped?.Invoke();
-            MicSilenced?.Invoke();
         }
-    }
-
-    private void OnWakeTimeout(object? state)
-    {
-        if (Current == AssistantState.WakeListening)
-        {
-            Transition(AssistantState.Sleep, "wake listening timed out — no voice ID match");
-            MicSilenced?.Invoke();
-        }
-    }
-
-    private void StartWakeTimeout()
-    {
-        _wakeTimer?.Dispose();
-        _wakeTimer = new System.Threading.Timer(OnWakeTimeout, null,
-            TimeSpan.FromSeconds(_settings.WakeListeningTimeoutSeconds), Timeout.InfiniteTimeSpan);
     }
 
     private void ResetInactivityTimer()
@@ -175,9 +126,7 @@ public class AssistantStateMachine : IDisposable
     public void Dispose()
     {
         _inactivityTimer?.Dispose();
-        _wakeTimer?.Dispose();
         _inactivityTimer = null;
-        _wakeTimer = null;
         GC.SuppressFinalize(this);
     }
 }

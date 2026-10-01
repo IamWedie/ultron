@@ -258,6 +258,11 @@
                             </Grid>
                             <TextBlock x:Name="MemoryHint" Text="Ask Gemini to 'remember X' or 'forget X' in conversation; edit/delete entries here."
                                        FontFamily="Consolas" FontSize="10" Foreground="#FF9BA1AB" TextWrapping="Wrap" />
+                            <HyperlinkButton x:Name="MemoryCorruptHint" Visibility="Collapsed"
+                                             Content="Memory file unreadable — nothing has been written. Click to reset it."
+                                             FontFamily="Consolas" FontSize="10" Foreground="#FFFFB703"
+                                             Padding="0" HorizontalAlignment="Left"
+                                             Click="MemoryDiscardCorrupt_Click" />
                         </StackPanel>
 
                         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -310,17 +315,10 @@
                                       Points="0,18 8,20 16,12 24,16 32,8 40,14 48,10 56,4 64,12 72,8 80,2" />
                         </Grid>
 
-                        <StackPanel Spacing="6">
-                            <TextBlock Text="VOICE-ID CONFIDENCE" FontFamily="Consolas" FontSize="11"
-                                       Foreground="#FF9BA1AB" FontWeight="SemiBold" />
-                            <Grid Height="8">
-                                <Border Height="8" CornerRadius="4" Background="#22FFFFFF" />
-                                <Border x:Name="ConfidenceFill" Height="8" CornerRadius="4"
-                                        HorizontalAlignment="Left" Width="0" Background="#FF9BA1AB" />
-                            </Grid>
-                            <TextBlock x:Name="ConfidenceText" Text="no voice profile"
-                                       FontFamily="Consolas" FontSize="10" Foreground="#FFC9CED6" />
-                        </StackPanel>
+                        <!-- VOICE-ID CONFIDENCE meter removed with the local speaker
+                             verification stack. There is no local speaker matching
+                             any more: the wake phrase is enforced by the Gemini
+                             system prompt, so there is no score to display. -->
 
                         <TextBlock Text="QUICK ACTIONS" FontFamily="Consolas" FontSize="11"
                                    Foreground="#FF9BA1AB" FontWeight="SemiBold" />
@@ -341,7 +339,8 @@
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
                             <Button Grid.Row="1" Grid.Column="0" Content="Focus Mode" Click="QuickAction_Click" Tag="focus"
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
-                            <Button Grid.Row="1" Grid.Column="1" Content="Wake Toggle" Click="QuickAction_Click" Tag="wake"
+                            <Button x:Name="MicToggleButton" Grid.Row="1" Grid.Column="1" Content="Mic Toggle"
+                                    Click="QuickAction_Click" Tag="wake"
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
                             <Button Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Open Settings" Click="QuickAction_Click" Tag="settings"
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />

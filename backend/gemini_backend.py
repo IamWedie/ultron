@@ -301,7 +301,16 @@ TOOL_DECLARATIONS = [
     {
         "name": "close_camera",
         "description": "Closes/releases the webcam after a screen_process camera capture. Call when the user says close the camera, stop the camera, turn it off, etc.",
-        "parameters": {"type": "OBJECT", "properties": {}},
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "go_to_sleep",
+        "description": (
+            "Stop listening and close the microphone. Call this when the user says "
+            "go to sleep, stop listening, that's all, I'm done, or similar. The user "
+            "will have to re-open the wake toggle or type to talk to you again."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "set_live_vision",
@@ -714,9 +723,30 @@ TOOL_DECLARATIONS = [
 # ============================================================
 
 class MemoryManager:
+    """Read-only view of ULTRON's canonical long-term memory (long_term.json).
+
+    The C# app owns this file. It is the single authority for every stored fact:
+    the Memory panel, the model's save_memory/recall_memory tools and the system
+    prompt all go through it. This class only formats the file for prompt
+    injection, so there is no second writer and no second schema to drift.
+
+    Writes were previously implemented here too (update/search) but were never
+    called from anywhere - the model tools are handled in C#. They are gone, and
+    with them the only path that could have made the Python copy disagree with
+    the C# one.
+    """
+
+    # Ordering preference only; any other category the user invents is still shown.
+    PREFERRED_CATEGORIES = ("identity", "preferences", "projects",
+                            "relationships", "wishes", "notes")
+    MAX_KEY_CHARS = 120
+    MAX_VALUE_CHARS = 380
+    MAX_PER_CATEGORY = 6
+
     def __init__(self, path: str):
         self.path = path
         self.load_error = None
+        self.logging_enabled = True
         try:
             self.data = self._load()
         except json_store.CorruptStoreError as exc:
@@ -726,53 +756,11 @@ class MemoryManager:
     def _load(self) -> dict:
         return json_store.load(self.path, {})
 
-    def _save(self):
-        if self.load_error:
-            raise RuntimeError(self.load_error)
-        json_store.save(self.path, self.data)
-
-    def update(self, category: str, key: str, value: str):
-        category = str(category or "notes").strip()[:64]
-        key = str(key or "item").strip()[:120]
-        value = str(value or "").strip()[:380]
-        if category not in self.data:
-            self.data[category] = {}
-        self.data[category][key] = {
-            "value": value,
-            "updated": datetime.now().strftime("%Y-%m-%d"),
-        }
-        self._save()
-
-    def search(self, query: str, limit: int = 8) -> str:
-        query_lower = query.lower()
-        words = [w for w in __import__("re").split(r"\W+", query_lower) if len(w) > 1]
-        results = []
-        for cat, entries in self.data.items():
-            if not isinstance(entries, dict):
-                continue
-            for key, entry in entries.items():
-                if not isinstance(entry, dict):
-                    continue
-                val = entry.get("value", "")
-                score = 0
-                if query_lower in key.lower():
-                    score += 10
-                if query_lower in val.lower():
-                    score += 3
-                for w in words:
-                    if w in key.lower():
-                        score += 2
-                    if w in val.lower():
-                        score += 1
-                if score > 0:
-                    results.append((score, f"[{cat}] {key}: {val}"))
-        results.sort(key=lambda x: -x[0])
-        if not results:
-            return "Nothing found in memory."
-        return "\n".join(r[1] for r in results[:limit])
-
     def format_for_prompt(self) -> str:
-        # Refresh from disk so edits made through the C# memory panel (which
+        if not self.logging_enabled:
+            # The user's privacy switch is off: inject nothing at all.
+            return ""
+        # Re-read from disk so edits made through the C# memory panel (which
         # writes the file directly) are honored on the next prompt.
         try:
             self.data = self._load()
@@ -780,15 +768,25 @@ class MemoryManager:
         except json_store.CorruptStoreError as exc:
             self.load_error = str(exc)
             return ""
+        if not isinstance(self.data, dict):
+            return ""
+
+        present = [c for c, e in self.data.items()
+                   if isinstance(e, dict) and e]
+        if not present:
+            return ""
+
+        ordered = [c for c in self.PREFERRED_CATEGORIES if c in present]
+        ordered += sorted((c for c in present if c not in self.PREFERRED_CATEGORIES),
+                          key=str.lower)
+
         parts = []
-        for cat in ["identity", "preferences", "projects", "relationships", "wishes", "notes"]:
+        for cat in ordered:
             entries = self.data.get(cat, {})
-            if not isinstance(entries, dict) or not entries:
-                continue
             lines = []
-            for k, v in list(entries.items())[:6]:
-                val = v.get("value", str(v)) if isinstance(v, dict) else str(v)
-                lines.append(f"  - {str(k)[:120]}: {str(val)[:380]}")
+            for k, v in list(entries.items())[:self.MAX_PER_CATEGORY]:
+                val = v.get("value", "") if isinstance(v, dict) else v
+                lines.append(f"  - {str(k)[:self.MAX_KEY_CHARS]}: {str(val)[:self.MAX_VALUE_CHARS]}")
             if lines:
                 parts.append(f"{cat.title()}:\n" + "\n".join(lines))
         if not parts:
@@ -823,6 +821,22 @@ TOOL ROUTING:
 - type_text to send keyboard input (always ask confirmation first)
 - press_key for shortcuts/media keys (ctrl+c, play, next, volume_up, alt+tab)
 - window_manage to focus/minimize/maximize/close windows or list them
+- go_to_sleep when the user tells you to sleep, go to sleep, stop listening, or says they are done for now
+"""
+
+
+# Added to the system prompt only while the wake gate is armed. The wake phrase
+# used to be detected on-device by cosine-matching an enrolled recording of the
+# user's own voice, which could not tell "hey Ultron" from any other second of
+# speech. Enforcing it here means the cloud model decides, using the same
+# transcription of the turn it is already answering.
+WAKE_GATE_PROMPT = """WAKE GATE (armed):
+- The microphone is open, but you are NOT in a conversation yet.
+- Only begin a reply when the user's turn starts with the wake phrase "Hey Ultron" (or "Yo Ultron" / "Morning Ultron").
+- If a turn does not contain the wake phrase, produce NO response at all. Stay completely silent. Do not acknowledge, summarise, or answer whatever was said.
+- Once the user has said the wake phrase, stay in conversation for the rest of the session. Do not require the phrase again.
+- If the user says "go to sleep", "stop listening" or similar, call go_to_sleep, then say nothing more.
+- The user can also type to you at any time; typed messages are always answered without needing the wake phrase.
 """
 
 
@@ -863,10 +877,19 @@ class GeminiSession:
         self._computer_act_responses: dict[int, asyncio.Future] = {}
         self._guardian_task: asyncio.Task | None = None
         self._guardian_last_alert: dict[str, float] = {}
-        self._wake_enabled = False   # wake-word gate: asleep until 'Hey Ultron' is heard
-        self._awake = True           # awake → the mic forwards to Gemini
+        # Two independent switches, and the confusion between them is what made
+        # the old wake behaviour so hard to reason about:
+        #   _wake_enabled  -> the "only answer after 'Hey Ultron'" instruction is
+        #                     present in the system prompt. Seeded from the
+        #                     ULTRON_WAKE_GATE env var so the first session is
+        #                     already correct; changing it later forces a
+        #                     reconnect because a prompt is fixed per session.
+        #   _awake         -> the microphone itself is streaming to Gemini.
+        self._wake_enabled = os.environ.get("ULTRON_WAKE_GATE", "0") == "1"
+        self._session_wake_gate = None  # what the live session's prompt was built with
+        self._awake = True           # mic open by default
         self._last_user_speech = time.monotonic()
-        self._wake_listening_timeout = 25.0   # turn-based: sleep if no speech within this window
+        self._idle_sleep_timeout = 120.0  # room silent this long -> mic stops streaming
         self._voice = UltronVoice(enabled=False, semitones=-3.5) if _HAS_DSP else None
         self._monitor_enabled = False          # background_monitor toggle
         self._away_mode = False                # outreach: route alerts to messages while away
@@ -931,7 +954,13 @@ class GeminiSession:
         if memory_block:
             system_parts.append(memory_block)
         system_parts.append(SYSTEM_PROMPT)
+        if self._wake_enabled:
+            system_parts.append(WAKE_GATE_PROMPT)
         system_parts.append(self._build_persona_block())
+        # Remember what this session was built with: the system prompt is fixed
+        # for a session's lifetime, so arming or disarming the wake gate has to
+        # rebuild the session before the instruction can take effect.
+        self._session_wake_gate = self._wake_enabled
 
         return dict(
             response_modalities=["AUDIO"],
@@ -1199,6 +1228,23 @@ class GeminiSession:
         if self._voice is not None and self._voice.enabled:
             self._voice.reset()
         self._speaking = False
+
+    def _handle_go_to_sleep(self) -> str:
+        """Close the microphone because the model was asked to.
+
+        The system prompt tells the model to stay silent after calling this, so
+        the only thing left to do is actually stop the audio and tell the UI, so
+        the wake toggle greys out and the face goes to sleep.
+        """
+        self._awake = False
+        try:
+            while not self._mic_queue.empty():
+                self._mic_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        _send_event({"type": "status", "state": "asleep",
+                     "message": "Sleeping — open the wake toggle or type to wake me."})
+        return "Microphone closed. I will not respond to speech until the user wakes me again."
 
     def _handle_set_voice(self, args: dict) -> str:
         if self._voice is None:
@@ -1707,14 +1753,14 @@ class GeminiSession:
                         # Model started speaking
                         if sc.model_turn:
                             self._speaking = True
-                            # Turn-based wake: the instant the model starts
-                            # responding to the user's utterance, stop listening
-                            # so background noise in the room can never keep
-                            # streaming in. Re-wake with the wake word.
-                            if self._wake_enabled and self._awake:
-                                self._awake = False
-                                _send_event({"type": "status", "state": "asleep",
-                                             "message": "Listening turn ended — say the wake word again."})
+                            # NOTE: the mic is deliberately NOT closed here.
+                            # It used to be, which meant ULTRON answered exactly
+                            # one command and then went deaf until the wake word
+                            # was heard again ("Listening turn ended — say the
+                            # wake word again"). Staying open lets a conversation
+                            # continue; the wake gate now controls the mic as a
+                            # whole, and sleep is explicit (sleep phrase, toggle,
+                            # or the idle timeout in _run_sleep_watch).
 
                     # Tool calls
                     if response.tool_call and response.tool_call.function_calls:
@@ -1734,6 +1780,8 @@ class GeminiSession:
                                 elif fc.name == "close_camera":
                                     self._pending_vision = None
                                     result = "Camera closed."
+                                elif fc.name == "go_to_sleep":
+                                    result = self._handle_go_to_sleep()
                                 elif fc.name == "set_voice":
                                     result = self._handle_set_voice(args)
                                 elif fc.name == "set_live_vision":
@@ -1832,20 +1880,25 @@ class GeminiSession:
             stream.close()
 
     async def _run_sleep_watch(self):
-        """Wake-word mode only. Two auto-sleep paths:
-        (1) immediate — the model began answering, so the listening turn is over
-        (handled in _receive_loop on model_turn); (2) timeout — the user woke
-        but never spoke within _wake_listening_timeout seconds."""
+        """Idle timeout only.
+
+        Previously this also enforced the old turn-based wake, which closed the
+        mic the moment the model started answering. That is gone: ULTRON now
+        stays awake for a whole conversation and sleeps only when the user asks
+        it to, flips the toggle, or the room has been silent for
+        _idle_sleep_timeout seconds. The timeout exists so a forgotten gate does
+        not leave the microphone streaming indefinitely.
+        """
         while self._running:
             await asyncio.sleep(3)
             if not self._wake_enabled or not self._awake:
                 continue
             if self._speaking or self._pending_vision:
                 continue
-            if (time.monotonic() - self._last_user_speech) > self._wake_listening_timeout:
+            if (time.monotonic() - self._last_user_speech) > self._idle_sleep_timeout:
                 self._awake = False
                 _send_event({"type": "status", "state": "asleep",
-                             "message": "Listening turn ended — say the wake word again."})
+                             "message": f"Nothing heard for {int(self._idle_sleep_timeout)}s — sleeping."})
 
     async def _ipc_read_loop(self):
         import threading
@@ -1931,6 +1984,8 @@ class GeminiSession:
             self._control_running = False
             self._shutdown_event.set()
         elif msg_type == "set_awake":
+            # Mic gate only. This has nothing to do with the "Hey Ultron" gate,
+            # which is _wake_enabled and lives in the system prompt.
             self._awake = _parse_bool(msg.get("on"), False)
             if self._awake:
                 self._last_user_speech = time.monotonic()
@@ -1941,15 +1996,42 @@ class GeminiSession:
                     self._mic_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-        elif msg_type == "set_wake":
-            self._wake_enabled = _parse_bool(msg.get("enabled"), False)
-            if self._wake_enabled:
-                self._awake = False   # start asleep; the wake word brings it up
-            else:
-                self._awake = True    # gate off -> always listening
+            # Echo the resulting state back. The frontend no longer assumes the
+            # toggle succeeded: it paints from this event, so every mic state the
+            # UI shows — including the ones we force ourselves (idle timeout,
+            # go_to_sleep) — comes from one authoritative place.
             _send_event({"type": "status",
                          "state": "awake" if self._awake else "asleep",
-                         "message": "Wake word armed" if self._wake_enabled else "Wake word off"})
+                         "message": ("Microphone open." if self._awake else
+                                     "Microphone closed.")})
+        elif msg_type == "set_wake":
+            # Arms or disarms the cloud wake gate ("only answer after 'Hey
+            # Ultron'"). This is a system-prompt concern, not a mic concern: the
+            # system prompt is fixed for a session, so a change drops the session
+            # and the supervisor reconnects with the new instruction. Mic open /
+            # closed is set_awake's job, not this one's.
+            enabled = _parse_bool(msg.get("enabled"), False)
+            if enabled != self._wake_enabled:
+                self._wake_enabled = enabled
+                # The system prompt is immutable once a session is live, so the
+                # only way to change the gate is to drop the session and let the
+                # supervisor reconnect with a rebuilt config. Guarding on
+                # _session_wake_gate keeps a redundant message from causing a
+                # reconnect loop before the first connect has even happened.
+                if self.session is not None and enabled != self._session_wake_gate:
+                    _send_event({"type": "status", "state": "reconnecting",
+                                 "message": "Wake gate changed — reconnecting..."})
+                    self.session = None  # exits the `async with`; supervisor reconnects
+            # No awake/asleep event here: the C# side painted the toggle itself,
+            # and an unexpected state string would just be dropped by its handler.
+            print(f"Wake gate {'armed' if self._wake_enabled else 'off'}", file=sys.stderr)
+        elif msg_type == "set_memory_logging":
+            # The user's privacy switch. When off, nothing is injected into the
+            # system prompt either — the C# side also blocks writes.
+            enabled = _parse_bool(msg.get("enabled"), True)
+            self.memory.logging_enabled = enabled
+            _send_event({"type": "status", "state": "memory",
+                         "message": "Memory logging on" if enabled else "Memory logging off"})
         elif msg_type == "voice_dsp" and self._voice is not None:
             opts = {}
             if "enabled" in msg:
