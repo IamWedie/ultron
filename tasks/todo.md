@@ -24,6 +24,61 @@
 - [ ] **Follow-ups:** live Telegram call acceptance; `file_processor` per-operation allowlist
       with reparse-safe handles; hashed Python dependency lockfile; GitHub Actions SHA pins.
 
+## Memory consolidation + cloud wake gate — in progress
+
+- [x] **Single fact store:** `Services/LongTermMemory.cs` owns `long_term.json` with atomic
+      writes, secret redaction, and a refuse-on-corrupt guard. `MemoryStore` keeps the
+      conversation transcript only; its `facts` write/list APIs are gone.
+- [x] **Split brain fixed:** `save_memory` / `recall_memory`, the Memory panel, and the
+      system-prompt injection all read and write the same file. Empty recall is a
+      `ToolResult.NotFound` miss, so the model can no longer claim it remembered nothing.
+- [x] **Python side made read-only:** `MemoryManager` re-reads the JSON and renders the
+      prompt block; it cannot write. `set_memory_logging` blocks injection at the source.
+- [x] **Non-destructive migration:** `ReadLegacyFactsAsync` + `ClearLegacyFactsAsync` replace
+      the old `DrainLegacyFactsAsync`, so the import runs before the delete and a failed
+      import cannot destroy the only copy. Unparseable rows are archived under
+      `notes/_legacy_unparsed` rather than dropped. Covered by
+      `ReadLegacyFacts_DoesNotDelete_SoAFailedImportIsRecoverable`.
+- [x] **Memory Logging gate is total:** all four Memory panel mutations go through
+      `TryWrite`, which now refuses while the setting is off. Previously the panel wrote
+      straight to the store and the setting's promise was false.
+- [x] **One-command deafness fixed:** the backend no longer sets `_awake = False` on the
+      first `model_turn`. The mic stays open for the whole conversation.
+- [x] **Sleep is explicit:** the model's new `go_to_sleep` tool, the UI toggle, and a
+      120 s idle timeout are the only paths that close the mic.
+- [x] **Wake gate moved to the cloud:** `WAKE_GATE_PROMPT` is appended to the system
+      instruction, seeded from the `ULTRON_WAKE_GATE` env var at launch so the first
+      session is already correct. Toggling it later drops the session so the supervisor
+      reconnects with a rebuilt config — a prompt cannot be patched live.
+- [x] **Toggle is a real gate:** `QuickAction_Click` "wake" now delegates to `ToggleAwake`
+      instead of simulating a local wake, and `SetWakeToggleVisual` paints red/grey to
+      match the actual microphone state.
+- [x] **Docs corrected:** README and architecture no longer claim local STT/TTS, a local
+      wake word, or SQLite facts.
+- [x] **Local audio stack removed:** deleted `AudioCapture.cs`, `VoiceId.cs`, `VoiceAudio.cs`,
+      `SileroVad.cs` (C#), `WhisperStt.cs`, `MainWindow.VoiceId.cs`, and
+      `MainWindow.VoicePipeline.cs`. `MainWindow.VoiceId.cs` was replaced by
+      `MainWindow.CommandInput.cs`, which keeps only the typed `SendCommand` path.
+      `Ultron.csproj` no longer references NAudio or `Microsoft.ML.OnnxRuntime.DirectML`, and the
+      `RestoreDirectMLRuntime` target plus the WindowsAppSDK ONNX exclusions are gone.
+      `ModelRepo` keeps a single entry, `silero-vad.onnx`, which the Python `VADGate` loads
+      through its own `onnxruntime` dependency. Python VAD, voice DSP, and Telegram call audio
+      are untouched.
+- [x] **State machine simplified:** `AssistantState.WakeListening` removed along with
+      `WakeDetected` / `VoiceIdPassed` / `VoiceIdFailed`, the wake timeout timer, and the
+      `MicRequested` / `MicSilenced` events. The machine now tracks only
+      `Sleep → Engaged → Rest` for the HUD and the inactivity timeout; the backend owns the mic gate.
+- [x] **Voice-ID settings and UI removed:** `VoiceEnrolled`, `VoiceProfile`, `WakePhrases`, and
+      `WakeListeningTimeoutSeconds` deleted from `AppSettings`; the VOICE-ID CONFIDENCE meter is
+      gone from `MainWindow.xaml`.
+- [x] **Honest disconnect behaviour:** `ToggleAwake` now says plainly that speech is unavailable
+      when Gemini is not connected instead of falling back to a local pipeline that no longer exists.
+- [x] **Docs corrected:** README and architecture no longer claim local STT/TTS, a local
+      wake word, or SQLite facts.
+- [ ] **Live acceptance:** wake gate, continuous conversation, `go_to_sleep`, idle timeout,
+      and the mic toggle need a real quiet room and the user's hardware.
+- [ ] **Feature-by-feature review:** walk every capability and record keep/remove.
+
 ## Phase 1 — Remote reach (foundation)
 
 - [x] **T1: Outreach router (C#)**

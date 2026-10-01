@@ -15,7 +15,7 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
   - `TranscriptReceived` → display user/assistant text in chat.
   - `ToolCallReceived` → route to C# local tools (desktop control, press_key, window_manage, undo stack) OR forward to backend's tool_call for server-handled tools (create_document, task_inbox, guardian, computer_use, set_live_vision).
   - `ComputerActRequested` → execute mouse/keyboard actions (`ExecuteComputerAct`), reply with `SendComputerActResultAsync`.
-  - `StatusChanged` → update status bar + mic state (asleep/awake/speaking).
+  - `StatusChanged` → update status bar + mic state. `asleep`/`awake` now mean "is microphone audio streaming", and repaint the Wake Toggle (red = streaming, grey = shut) so the button and the actual gate cannot disagree.
 - **Local tools** (C# side, fast Win32 API calls):
   - `press_key` / `type_text` → SendInputBatch (synthetic keyboard input).
   - `window_manage` → Native.FindWindowByTitle / ListWindows + focus/minimize/maximize/close/Alt+Tab/ShowDesktop.
@@ -26,12 +26,16 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
 
 ### 1.2 Python Backend (`gemini_backend.py`)
 - **Gemini Live session**: Google genai API, model `gemini-2.5-flash`. Session configured with ~20 tool declarations (server-side + client-side tools merged).
-- **Audio pipeline**:
-  - `_mic_capture_loop`: VAD-gated mic capture via sounddevice, sent as PCM16 to Gemini Live input.
+- **Audio pipeline** (cloud speech in and out; no local STT or TTS):
+  - `_mic_capture_loop`: VAD-gated mic capture via sounddevice, sent as PCM16 to Gemini Live input. The VAD is a signal gate only — Gemini transcribes the audio.
   - `_audio_play_loop`: Gemini PCM output decoded and played via sounddevice Output stream. DSP layer (`VoiceDsp` from `voice_dsp.py`) applies EQ/flanger/shaping when enabled (currently OFF per user request).
   - `_send_audio_loop`: bridges mic queue to Gemini Live `send_realtime`.
+- **Wake gate and sleep** — two independent switches that used to be conflated:
+  - `_wake_enabled` (seeded from the `ULTRON_WAKE_GATE` env var, set from `AppSettings.WakeWordEnabled` at launch) controls whether `WAKE_GATE_PROMPT` is appended to the system instruction. The prompt tells the model to stay silent until the user says "Hey Ultron" and to stay in conversation afterwards. Because a system instruction is immutable for a session's lifetime, changing this mid-session drops the session so the supervisor reconnects with a rebuilt config.
+  - `_awake` is the real microphone gate: `set_awake` opens or closes the stream. It starts `True`.
+  - **Sleep is explicit.** The old build set `_awake = False` on the first `model_turn`, which made ULTRON answer exactly one command and then go deaf. The only sleeps now are the model's own `go_to_sleep` call, the UI toggle, and `_run_sleep_watch` after `_idle_sleep_timeout` (120 s) of silence.
 - **Tool dispatch** (inside the Live session loop): Python-side tools are handled directly:
-  - `save_memory` / `recall_memory` → `MemoryManager` (JSON store, categories: people/projects/topics/preferences/apps/system).
+  - `save_memory` / `recall_memory` → round-tripped to C# (`MainWindow.Handlers.Memory.cs`) and served by `LongTermMemory`, which owns `%LOCALAPPDATA%\Ultron\long_term.json`. The Python `MemoryManager` is read-only: it re-reads that file and renders a `[LONG-TERM MEMORY]` block for the system prompt, and it never writes. Categories: people/projects/topics/preferences/apps/system.
   - `background_monitor` → `monitor_store` (due topics, intervals, last-checked).
   - `computer_use` → autonomous desktop agent (`computer_use.py`): screenshots screen, asks Gemini to decide next action, calls `_computer_act` (IPC round-trip to C# for actual mouse/keyboard), repeat up to N steps.
   - `set_live_vision` → toggle ambient webcam capture; on `turn_complete`, capture frame and inject as user turn ("Here's what the user sees...").
@@ -52,14 +56,15 @@ This document provides a complete walkthrough of the ULTRON voice assistant syst
 |------|------|
 | `MainWindow.xaml.cs` | WinUI UI, C# tool dispatch, keyboard/mouse helpers |
 | `Services/GeminiBackend.cs` | C# ↔ Python IPC, event bridge, Win32 native calls |
-| `Services/AppSettings.cs` | Persisted settings (DSP on/off, voice model, mic device, key bindings) |
+| `Services/AppSettings.cs` | Persisted settings (DSP on/off, voice model, mic device, `MemoryLogging`, `WakeWordEnabled`) |
 | `backend/gemini_backend.py` | Gemini Live session, audio capture/play, tool dispatch, IPC bridge |
 | `backend/voice_dsp.py` | Real-time audio DSP (EQ, flanger, reverb) — vectorized for performance |
 | `backend/computer_use.py` | Autonomous desktop agent engine (screenshot → AI decision → action loop) |
 | `backend/guardian.py` | System health watchdog (CPU/memory/battery), config persistence |
 | `backend/productivity.py` | Document builder (Word/Excel/PPTX) + persistent task inbox |
 | `backend/monitor.py` | Background topic scheduler (due timestamps, intervals) |
-| `backend/memory_store.json` | Persistent memory (user preferences, facts, people) |
+| `Services/LongTermMemory.cs` | The single fact store: reads and writes `%LOCALAPPDATA%\Ultron\long_term.json` atomically, redacts secrets, refuses to write over a corrupt file |
+| `Services/MemoryStore.cs` | SQLite conversation transcript only. The retired `facts` table is read once for migration, then cleared |
 | `backend/call_audio_bridge.py` | Telegram call audio bridge (resampling, barge-in, queue drain) |
 | `backend/telegram_client.py` | Telegram auth + call state machine (Telethon + ntgcalls) |
 | `MainWindow.Calls.cs` | Telegram call overlay UI, call state, duration tick, hangup |
@@ -79,6 +84,7 @@ does not exist.
 ### 1.4 Data Flow Summary
 ```
 User speaks → Mic (VAD gate) → Python audio_queue → Gemini Live API
+Wake gate: silent until "Hey Ultron" is heard, then continuous until sleep/toggle/idle
 Gemini Live → function_call (tool) → Python dispatch → result → send_tool_response
 Gemini Live → audio chunk → Python audio_play → Speaker
 User types in chat → C# → IPC to Python → Gemini text input (non-voice)
@@ -117,11 +123,15 @@ Task inbox overdue → guardian loop → same _speak_unsolicited path
 | Productivity | ✅ Word/Excel/PPTX generation + persistent task inbox |
 | Live vision | ✅ Ambient webcam capture per user exchange |
 | Full keyboard/media | ✅ Media keys + window manage actions |
+| Speech recognition / synthesis | ✅ Cloud-only (Gemini Live). `WhisperStt`, `SileroVad` (C#), `AudioCapture`, `VoiceId`, `VoiceAudio`, NAudio and the DirectML ONNX package are all deleted; `MainWindow.VoiceId.cs` became `MainWindow.CommandInput.cs` |
+| Wake gate | ⚠️ Implemented as a system-prompt instruction. Logic verified; needs live mic acceptance |
+| Long-term memory | ✅ Single `long_term.json` store, gated by *Memory Logging*, non-destructive legacy migration |
+| Conversation transcript | ✅ SQLite `memory.db`, gated by *Memory Logging* |
 
 ---
 
-## 2. Next Steps
-1. **Test all ULTRON features by voice** (user plans to do when noise is low).
+## 3. Next Steps
+1. **Live voice acceptance** (user's machine, quiet room): wake gate, continuous conversation, explicit sleep, idle timeout, Telegram call audio.
 2. **Fix remaining correctness issues** (call path, approval gates, IPC hardening).
-3. **Add Python CI** (compileall, pyflakes, requirements.txt).
-5. **Hardening** (approval gates, phone tool lockdown, DashboardServer localhost-only).
+3. **Hardening** (approval gates, phone tool lockdown, DashboardServer localhost-only).
+4. **Feature-by-feature review** with the user: confirm keep/remove for each shipped capability.

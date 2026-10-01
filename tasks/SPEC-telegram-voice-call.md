@@ -43,7 +43,7 @@ Each module ships green before the next starts. Every module spec is independent
   `GeminiSession.start()`, config `response_modalities=["AUDIO"]`). Input: int16 16 kHz mono.
   Output: int16 24 kHz mono. No new TTS/STT.
 - **Resampling:** thin numpy adapter at module boundary (48 k ↔ 16 k / 24 k).
-- **Audio capture/playback:** NAudio (`AudioCapture.cs`, existing); outbound to Telegram
+- **Audio capture/playback:** `sounddevice` in the Python backend (the C# NAudio capture path was deleted); outbound to Telegram
   via py-tgcalls media stream; inbound from Telegram to Gemini `_mic_queue`.
 - **Securities:** DPAPI-encrypted session + config (`config.dat`, `telegram.session`);
   no secrets in source or logs; `Secrets.Redact` applied; `TelegramCallEnabled` off by default.
@@ -67,7 +67,7 @@ ultron_winui/
 ├── Services/                # C# services
 │   ├── GeminiBackend.cs     # child process manager, IPC, event model
 │   ├── AppSettings.cs       # DPAPI-encrypted config.dat
-│   └── ...                  # AudioCapture, SileroVad, WhisperStt, etc.
+│   └── ...                  # LongTermMemory, MemoryStore, volume, adb, logging
 ├── MainWindow.xaml[.cs]     # WinUI shell, settings, status, transcript
 ├── tools/Tests/             # xUnit tests (55 passing)
 └── tasks/                   # plan + todo (this spec's implementation tracker)
