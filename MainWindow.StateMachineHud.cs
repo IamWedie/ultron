@@ -41,18 +41,24 @@ public sealed partial class MainWindow
 
     private void ApplyStateVisual(AssistantState st)
     {
-        var (fill, stroke, label, dot, ticker) = st switch
+        var (eye, brow, label, dot, ticker, lid) = st switch
         {
-            AssistantState.Sleep => ("#1AFF2E2E", "#66FF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY"),
-            AssistantState.Engaged => ("#66FF2E2E", "#FFFF2E2E", "ENGAGED", "#FFFF2E2E", "CORE STATUS: ENGAGED"),
-            AssistantState.Rest => ("#22FF2E2E", "#AAFF2E2E", "REST", "#AAFF2E2E", "CORE STATUS: REST"),
-            _ => ("#1AFF2E2E", "#66FF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY"),
+            AssistantState.Sleep => ("#8C1E1E1E", "#4DFF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY", 0.10),
+            AssistantState.Engaged => ("#FFFF2E2E", "#FFFF2E2E", "ENGAGED", "#FFFF2E2E", "CORE STATUS: ENGAGED", 1.00),
+            AssistantState.Rest => ("#CC6B1E1E", "#8CFF2E2E", "REST", "#AAFF2E2E", "CORE STATUS: REST", 0.45),
+            _ => ("#8C1E1E1E", "#4DFF2E2E", "STANDBY", "#FF9BA1AB", "CORE STATUS: STANDBY", 0.10),
         };
-        OrbContainer.Fill = BrushFromHex(fill);
-        OrbContainer.Stroke = BrushFromHex(stroke);
+        _faceLid = lid;
+        SetEyeBrush(EyeLeftBrush, eye);
+        SetEyeBrush(EyeRightBrush, eye);
+        FaceBrowBrush.Color = ColorOfHex(brow);
+        FaceContourBrush.Color = ColorOfHex(brow);
+        EyeLeftScale.ScaleY = lid;
+        EyeRightScale.ScaleY = lid;
         OrbStateLabel.Text = label;
         TickerDot.Fill = BrushFromHex(dot);
         TickerText.Text = ticker;
+        ToolTipService.SetToolTip(UltronFace, $"Core status: {label}");
     }
 
     private void SetMicVisual(bool busy)
@@ -89,14 +95,26 @@ public sealed partial class MainWindow
         DispatcherQueue.TryEnqueue(() => AddMessage(who, text));
     }
 
-    private static SolidColorBrush BrushFromHex(string hex)
+    private static void SetEyeBrush(LinearGradientBrush brush, string eyeHex)
+    {
+        var c = ColorOfHex(eyeHex);
+        // Top stop stays brighter than the base so the lens highlight survives
+        // even when the eye itself is dimmed for sleep.
+        brush.GradientStops[0].Color = Color.FromArgb(
+            (byte)Math.Min(255, c.A + 64), c.R, c.G, c.B);
+        brush.GradientStops[1].Color = c;
+    }
+
+    private static SolidColorBrush BrushFromHex(string hex) => new(ColorOfHex(hex));
+
+    private static Color ColorOfHex(string hex)
     {
         var s = hex.TrimStart('#');
-        return new SolidColorBrush(Color.FromArgb(
+        return Color.FromArgb(
             byte.Parse(s[..2], NumberStyles.HexNumber),
             byte.Parse(s[2..4], NumberStyles.HexNumber),
             byte.Parse(s[4..6], NumberStyles.HexNumber),
-            byte.Parse(s[6..8], NumberStyles.HexNumber)));
+            byte.Parse(s[6..8], NumberStyles.HexNumber));
     }
 
 }

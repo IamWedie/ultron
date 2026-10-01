@@ -61,6 +61,11 @@ public sealed class AppSettings
     // Log verbosity: "Error", "Warn", "Info", "Debug". Everything below is filtered out.
     public string LogLevel { get; set; } = "Info";
 
+    // Show the diagnostics sidebar (CPU/memory/thread/uptime + sparkline). Off by
+    // default: those are the developer's own numbers, not Ultron state, and they
+    // competed visually with the face and the mic state. Toggleable from the HUD.
+    public bool ShowDiagnostics { get; set; }
+
     public bool AwayMode { get; set; }
     public string NotifyChannel { get; set; } = "telegram"; // telegram | sms | none
     public string NotifyNumber { get; set; } = "";

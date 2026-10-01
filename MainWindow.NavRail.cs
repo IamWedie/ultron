@@ -56,7 +56,7 @@ public sealed partial class MainWindow
         // Memory panel is its own dedicated central view.
         var isMemory = (btn.Tag as string) == "memory";
         MemoryView.Visibility = isMemory ? Visibility.Visible : Visibility.Collapsed;
-        OrbContainer.Visibility = isMemory ? Visibility.Collapsed : Visibility.Visible;
+        UltronFace.Visibility = isMemory ? Visibility.Collapsed : Visibility.Visible;
         OrbStateLabel.Visibility = isMemory ? Visibility.Collapsed : Visibility.Visible;
         ConversationList.Visibility = isMemory ? Visibility.Collapsed : Visibility.Visible;
         if (isMemory) RefreshMemory();

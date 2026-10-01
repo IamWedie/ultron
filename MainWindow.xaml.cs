@@ -291,9 +291,10 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
 
         _brain.ApprovalRequested += OnApprovalRequested;
         WireInputs();
-        StartTelemetryLoop();
-        StartOrbSpin();
+        StartFaceAnimation();
         ApplyStateVisual(_sm.Current);
+        ApplyTelemetryVisibility();
+        SetDiagnosticsToggleVisual(_settings.ShowDiagnostics);
 
         if ((!_settings.SetupComplete || string.IsNullOrEmpty(_settings.GeminiApiKey))
             && Environment.GetEnvironmentVariable("ULTRON_SKIP_SETUP") != "1")

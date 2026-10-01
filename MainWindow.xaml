@@ -184,29 +184,82 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- Visualizer HUD -->
-                    <Grid Grid.Row="0" Background="Transparent" Margin="0,6,0,0">
-                        <Ellipse x:Name="OrbContainer" Width="132" Height="132"
-                                 StrokeThickness="4"
-                                 Fill="#33FF2E2E"
-                                 HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <Ellipse.Stroke>
-                                <RadialGradientBrush>
-                                    <GradientStop Color="#FFFF2E2E" Offset="0" />
-                                    <GradientStop Color="#66FF2E2E" Offset="1" />
-                                </RadialGradientBrush>
-                            </Ellipse.Stroke>
-                            <Ellipse.RenderTransform>
-                                <TransformGroup>
-                                    <ScaleTransform x:Name="OrbPulse" ScaleX="1" ScaleY="1" />
-                                    <RotateTransform x:Name="OrbSpin" Angle="0" />
-                                </TransformGroup>
-                            </Ellipse.RenderTransform>
-                        </Ellipse>
-                        <TextBlock x:Name="OrbStateLabel" Text="STANDBY" FontFamily="Consolas"
-                                   FontSize="12" Foreground="#FF9BA1AB"
-                                   HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12" />
+                    <!-- Ultron face. The previous build spun a plain circle here,
+                         which read as generic loading UI rather than a face. Two
+                         lens eyes plus a brow carry the state instead: eye height
+                         and glow encode it, and the label below names it so state
+                         is never conveyed by colour alone. -->
+                    <Grid x:Name="UltronFace" Grid.Row="0" Background="Transparent" Margin="0,6,0,0"
+                          Width="132" Height="132"
+                          HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Grid.RenderTransform>
+                            <TransformGroup>
+                                <ScaleTransform x:Name="OrbPulse" ScaleX="1" ScaleY="1" />
+                            </TransformGroup>
+                        </Grid.RenderTransform>
+
+                        <!-- Brow: the clearest "am I listening" signal. Geometry is built in
+                             code because WinUI XAML has no path mini-language
+                             for PathFigureCollection. -->
+                        <Path x:Name="FaceBrow" StrokeThickness="4" Opacity="0.9"
+                              HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,42,0,0">
+                            <Path.Stroke>
+                                <SolidColorBrush x:Name="FaceBrowBrush" Color="#FFFF2E2E" />
+                            </Path.Stroke>
+                        </Path>
+
+                        <!-- Cheek lines give the face structure without a hard outline -->
+                        <Path x:Name="FaceContour" StrokeThickness="3" Opacity="0.5"
+                              HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Path.Stroke>
+                                <SolidColorBrush x:Name="FaceContourBrush" Color="#66FF2E2E" />
+                            </Path.Stroke>
+                        </Path>
+
+                        <!-- Eyes. ScaleY is the blink/lid channel, so
+                             RenderTransformOrigin must be the centre or a blink
+                             slides the eye instead of squashing it. The vertical
+                             gradient reads as a lens highlight. -->
+                        <Grid HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="30" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <Ellipse x:Name="EyeLeft" Grid.Column="0" Width="26" Height="32"
+                                     VerticalAlignment="Center"
+                                     RenderTransformOrigin="0.5,0.5">
+                                <Ellipse.Fill>
+                                    <LinearGradientBrush x:Name="EyeLeftBrush" StartPoint="0,0" EndPoint="0,1">
+                                        <GradientStop Color="#FFFF6B6B" Offset="0" />
+                                        <GradientStop Color="#FF2E2E" Offset="1" />
+                                    </LinearGradientBrush>
+                                </Ellipse.Fill>
+                                <Ellipse.RenderTransform>
+                                    <ScaleTransform x:Name="EyeLeftScale" ScaleX="1" ScaleY="1" />
+                                </Ellipse.RenderTransform>
+                            </Ellipse>
+
+                            <Ellipse x:Name="EyeRight" Grid.Column="2" Width="26" Height="32"
+                                     VerticalAlignment="Center"
+                                     RenderTransformOrigin="0.5,0.5">
+                                <Ellipse.Fill>
+                                    <LinearGradientBrush x:Name="EyeRightBrush" StartPoint="0,0" EndPoint="0,1">
+                                        <GradientStop Color="#FFFF6B6B" Offset="0" />
+                                        <GradientStop Color="#FF2E2E" Offset="1" />
+                                    </LinearGradientBrush>
+                                </Ellipse.Fill>
+                                <Ellipse.RenderTransform>
+                                    <ScaleTransform x:Name="EyeRightScale" ScaleX="1" ScaleY="1" />
+                                </Ellipse.RenderTransform>
+                            </Ellipse>
+                        </Grid>
                     </Grid>
+
+                    <TextBlock x:Name="OrbStateLabel" Grid.Row="0" Text="STANDBY" FontFamily="Consolas"
+                               FontSize="12" Foreground="#FF9BA1AB"
+                               HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12" />
 
                     <!-- Conversation stream -->
                     <ListView x:Name="ConversationList" Grid.Row="1"
@@ -294,26 +347,31 @@
                 </Grid>
             </Grid>
 
-            <!-- ===================== RIGHT TELEMETRY SIDEBAR ===================== -->
+            <!-- ===================== RIGHT SIDEBAR ===================== -->
             <Border Grid.Column="2" Background="{StaticResource UltronGunmetalBrush}"
                     BorderBrush="#33FFFFFF" BorderThickness="1,1,0,0">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Padding="16" Spacing="16">
 
-                        <TextBlock Text="DIAGNOSTICS" FontFamily="Consolas" FontSize="11"
-                                   Foreground="#FF9BA1AB" FontWeight="SemiBold" />
+                        <!-- Host diagnostics (CPU/memory/threads/uptime). Hidden by
+                             default: these describe the PC, not Ultron, and they
+                             competed with the face and mic state for attention. -->
+                        <StackPanel x:Name="DiagnosticsPanel" Spacing="8" Visibility="Collapsed">
+                            <TextBlock Text="DIAGNOSTICS" FontFamily="Consolas" FontSize="11"
+                                       Foreground="#FF9BA1AB" FontWeight="SemiBold" />
 
-                        <StackPanel Spacing="6">
-                            <TextBlock Text="MEM  --" x:Name="MemText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
-                            <TextBlock Text="CPU  --" x:Name="CpuText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
-                            <TextBlock Text="THR  --" x:Name="ThreadText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
-                            <TextBlock Text="CAM  --" x:Name="CamText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="MEM  --" x:Name="MemText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                                <TextBlock Text="CPU  --" x:Name="CpuText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                                <TextBlock Text="THR  --" x:Name="ThreadText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                                <TextBlock Text="UP   --" x:Name="CamText" FontFamily="Consolas" FontSize="12" Foreground="#FFC9CED6" />
+                            </StackPanel>
+
+                            <Grid Height="46">
+                                <Polyline x:Name="SparkLine" Stroke="{StaticResource UltronGoldBrush}" StrokeThickness="1.5"
+                                          Points="0,18 8,20 16,12 24,16 32,8 40,14 48,10 56,4 64,12 72,8 80,2" />
+                            </Grid>
                         </StackPanel>
-
-                        <Grid Height="46">
-                            <Polyline x:Name="SparkLine" Stroke="{StaticResource UltronGoldBrush}" StrokeThickness="1.5"
-                                      Points="0,18 8,20 16,12 24,16 32,8 40,14 48,10 56,4 64,12 72,8 80,2" />
-                        </Grid>
 
                         <!-- VOICE-ID CONFIDENCE meter removed with the local speaker
                              verification stack. There is no local speaker matching
@@ -324,25 +382,29 @@
                                    Foreground="#FF9BA1AB" FontWeight="SemiBold" />
 
                         <Grid ColumnSpacing="8" RowSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <Button Grid.Row="0" Grid.Column="0" Content="Purge Cache" Click="QuickAction_Click" Tag="purge"
-                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
-                            <Button Grid.Row="0" Grid.Column="1" Content="System Lock" Click="QuickAction_Click" Tag="lock"
-                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
-                            <Button Grid.Row="1" Grid.Column="0" Content="Focus Mode" Click="QuickAction_Click" Tag="focus"
-                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
-                            <Button x:Name="MicToggleButton" Grid.Row="1" Grid.Column="1" Content="Mic Toggle"
+<Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Button x:Name="MicToggleButton" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Content="Mic Toggle"
                                     Click="QuickAction_Click" Tag="wake"
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
-                            <Button Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Open Settings" Click="QuickAction_Click" Tag="settings"
+                                <Button Grid.Row="1" Grid.Column="0" Content="Purge Cache" Click="QuickAction_Click" Tag="purge"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                                <Button Grid.Row="1" Grid.Column="1" Content="System Lock" Click="QuickAction_Click" Tag="lock"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                                <Button Grid.Row="2" Grid.Column="0" Content="Focus Mode" Click="QuickAction_Click" Tag="focus"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                                <Button x:Name="DiagnosticsToggleButton" Grid.Row="2" Grid.Column="1" Content="Show Diagnostics"
+                                    Click="DiagnosticsToggle_Click"
+                                    CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
+                                <Button Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Content="Open Settings" Click="QuickAction_Click" Tag="settings"
                                     CornerRadius="6" FontFamily="Consolas" FontSize="11" Padding="8,10" />
                         </Grid>
 

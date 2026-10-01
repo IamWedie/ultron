@@ -65,4 +65,10 @@ public sealed partial class MainWindow
         }
     }
 
+    private void DiagnosticsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _lastInteraction = DateTime.UtcNow;
+        ToggleDiagnostics();
+    }
+
 }

@@ -29,22 +29,60 @@ public sealed partial class MainWindow
 {
     /* ===================== TELEMETRY ===================== */
 
-    private void StartTelemetryLoop()
-    {
-        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        t.Tick += (_, _) =>
-        {
-            var s = _telemetry.Snapshot();
-            MemText.Text = $"MEM  {s.MemMb,6:F0} MB";
-            CpuText.Text = $"CPU  {s.CpuPercent,4:F0}%";
-            ThreadText.Text = $"THR  {s.ThreadCount,4}";
-            CamText.Text = $"UP   {(int)s.Uptime.TotalHours}h {s.Uptime.Minutes}m";
+    private DispatcherTimer? _telemetryTimer;
 
-            _spark.Enqueue(Math.Clamp(s.CpuPercent, 0, 100));
-            if (_spark.Count > 30) _spark.Dequeue();
-            RenderSparkline(_spark.ToArray());
-        };
-        t.Start();
+    /// <summary>
+    /// Shows or hides the diagnostics sidebar. The sampling timer only runs while
+    /// the panel is visible, so hiding it also stops the per-second process
+    /// refresh rather than just making it invisible.
+    /// </summary>
+    private void ApplyTelemetryVisibility()
+    {
+        var visible = _settings.ShowDiagnostics;
+        DiagnosticsPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+
+        if (!visible)
+        {
+            _telemetryTimer?.Stop();
+            return;
+        }
+
+        if (_telemetryTimer is not null) return;
+        _telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _telemetryTimer.Tick += (_, _) => RenderTelemetry(_telemetry.Snapshot());
+        _telemetryTimer.Start();
+        RenderTelemetry(_telemetry.Snapshot());
+    }
+
+    private void ToggleDiagnostics()
+    {
+        _settings.ShowDiagnostics = !_settings.ShowDiagnostics;
+        _settings.Save();
+        ApplyTelemetryVisibility();
+        SetDiagnosticsToggleVisual(_settings.ShowDiagnostics);
+    }
+
+    private void SetDiagnosticsToggleVisual(bool visible)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            DiagnosticsToggleButton.Content = visible ? "Hide Diagnostics" : "Show Diagnostics";
+            ToolTipService.SetToolTip(DiagnosticsToggleButton, visible
+                ? "Hide the CPU, memory and uptime readouts."
+                : "Show CPU, memory, thread count and uptime for this process.");
+        });
+    }
+
+    private void RenderTelemetry(TelemetrySnapshot s)
+    {
+        MemText.Text = $"MEM  {s.MemMb,6:F0} MB";
+        CpuText.Text = $"CPU  {s.CpuPercent,4:F0}%";
+        ThreadText.Text = $"THR  {s.ThreadCount,4}";
+        CamText.Text = $"UP   {(int)s.Uptime.TotalHours}h {s.Uptime.Minutes}m";
+
+        _spark.Enqueue(Math.Clamp(s.CpuPercent, 0, 100));
+        while (_spark.Count > 30) _spark.Dequeue();
+        RenderSparkline(_spark.ToArray());
     }
 
     private void RenderSparkline(double[] values)
