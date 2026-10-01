@@ -66,6 +66,98 @@ class VADGateTests(unittest.TestCase):
         self.assertEqual([len(chunk) // 2 for chunk in emitted], [512, 512, 512])
 
 
+class InputDeviceSelectionTests(unittest.TestCase):
+    def _devices(self, rows):
+        return [{"name": name, "max_input_channels": ch} for name, ch in rows]
+
+    def test_loopback_default_is_avoided(self):
+        devices = self._devices([
+            ("Stereo Mix (2- Realtek(R) Audio)", 2),
+            ("Microphone Array (Intel Smart Sound)", 4),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=0
+        )
+
+        self.assertEqual(chosen, 1)
+
+    def test_sound_mapper_default_falls_back_to_a_real_microphone(self):
+        devices = self._devices([
+            ("Microsoft Sound Mapper - Input", 2),
+            ("Microphone Array (Intel Smart Sound)", 4),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=0
+        )
+
+        self.assertEqual(chosen, 1)
+
+    def test_genuine_microphone_default_is_honoured(self):
+        devices = self._devices([
+            ("Stereo Mix (Realtek(R) Audio)", 2),
+            ("Microphone Array (Intel Smart Sound)", 4),
+            ("Microphone (Realtek HD Audio Mic input)", 2),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=2
+        )
+
+        self.assertEqual(chosen, 2)
+
+    def test_output_only_devices_are_not_candidates(self):
+        devices = self._devices([
+            ("Speakers (Realtek(R) Audio)", 0),
+            ("Microphone (Realtek HD Audio Mic input)", 2),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=0
+        )
+
+        self.assertEqual(chosen, 1)
+
+    def test_all_loopback_devices_yield_none_for_system_default(self):
+        devices = self._devices([
+            ("Stereo Mix (Realtek(R) Audio)", 2),
+            ("CABLE Output", 2),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=0
+        )
+
+        self.assertIsNone(chosen)
+
+    def test_loopback_names_are_rejected(self):
+        for name in ("Stereo Mix (2- Realtek(R) Audio)", "CABLE Output",
+                     "PC Speaker (Realtek HD Audio output)", "Monitor",
+                     "Wave Out Loopback", "Sine Generator", "Silence"):
+            with self.subTest(name=name):
+                self.assertTrue(gemini_backend._is_loopback_name(name))
+
+    def test_microphone_names_are_not_rejected(self):
+        for name in ("Microphone Array (Intel Smart Sound)",
+                     "Microphone (Realtek HD Audio Mic input)",
+                     "Headset Microphone"):
+            with self.subTest(name=name):
+                self.assertFalse(gemini_backend._is_loopback_name(name))
+
+    def test_named_microphone_outranks_generic_capture_driver(self):
+        devices = self._devices([
+            ("Primary Sound Capture Driver", 2),
+            ("Microphone Array (Intel Smart Sound)", 4),
+        ])
+
+        chosen = gemini_backend._resolve_default_input_device(
+            devices=devices, default_index=None
+        )
+
+        self.assertEqual(chosen, 1)
+
+
 class AudioBridgeTests(unittest.IsolatedAsyncioTestCase):
     def test_local_mic_is_resampled_from_16k_to_48k(self):
         sender = FakeSender()

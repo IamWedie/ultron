@@ -37,7 +37,11 @@ from google import genai
 from google.genai import types
 
 # --- audio ---
-import sounddevice as sd
+try:
+    import sounddevice as sd
+    _HAS_SD = True
+except ImportError:
+    _HAS_SD = False
 import numpy as np
 
 # --- vision (screen + webcam capture) ---
@@ -115,6 +119,104 @@ DEFAULT_PERSONA = {
     "suggest": 1,    # 0 only when asked, 1 moderate, 2 proactive
     "notes": "",     # free-text user preferences / standing instructions
 }
+
+# ============================================================
+# INPUT DEVICE SELECTION
+# ============================================================
+
+# Windows happily hands back a loopback tap ("Stereo Mix") as the default
+# input. Streaming that sends Gemini a copy of the speaker output, which is
+# silence during a normal spoken wake phrase — the mic looks open but no
+# speech ever arrives. Prefer a real capture endpoint when one exists.
+_LOOPBACK_NAME_HINTS = (
+    "stereo mix",
+    "loopback",
+    "wave out",
+    "playback",
+    "monitor",
+    "cable output",
+    "virtual cable",
+    "sine",
+    "silence",
+    "mix",
+    "speaker",
+    "sound mapper",
+)
+
+
+def _is_loopback_name(name: str) -> bool:
+    lowered = (name or "").lower()
+    return any(hint in lowered for hint in _LOOPBACK_NAME_HINTS)
+
+
+def _device_affinity_score(name: str) -> int:
+    """Higher is a more plausible microphone. Maps/sound-mapper entries sink."""
+    lowered = (name or "").lower()
+    if _is_loopback_name(lowered):
+        return -1
+    if "microphone" in lowered or "mic input" in lowered or "mic array" in lowered:
+        return 3
+    if "array" in lowered or "capture" in lowered or "headset" in lowered:
+        return 2
+    return 1
+
+
+def _resolve_default_input_device(devices=None, default_index=None):
+    """Pick a capture-capable input device, avoiding loopback taps.
+
+    Returns an index usable with sounddevice, or None to mean "system default".
+    Accepts injected device tables so this stays testable without audio hardware.
+    """
+    if devices is None:
+        if not _HAS_SD:
+            return None
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return None
+
+    candidates = []
+    for index, device in enumerate(devices):
+        if int(device.get("max_input_channels", 0) or 0) <= 0:
+            continue
+        score = _device_affinity_score(device.get("name", ""))
+        if score <= 0:
+            continue
+        candidates.append((score, -index, index))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+
+    # Honour the OS default only when it is a genuine mic. Windows often
+    # defaults to a loopback tap, and a "Sound Mapper" entry just resolves to
+    # that same default, so both are skipped in favour of a named mic.
+    if default_index is not None:
+        for score, _, index in candidates:
+            if index == default_index and score >= 2:
+                return index
+
+    return candidates[0][2]
+
+
+def _system_default_input_index():
+    if not _HAS_SD:
+        return None
+    try:
+        return sd.default.device[0]
+    except Exception:
+        return None
+
+
+def _input_device_name(index) -> str:
+    if index is None or not _HAS_SD:
+        return "system default"
+    try:
+        return str(sd.query_devices(index)["name"])
+    except Exception:
+        return f"device {index}"
+
 
 # ============================================================
 # VAD (Silero) — gates mic audio so ambient noise isn't streamed
@@ -1577,6 +1679,10 @@ class GeminiSession:
             while self._running:
                 if self._mic_device != current_dev:
                     target = self._mic_device
+                    if target is None:
+                        target = _resolve_default_input_device(
+                            default_index=_system_default_input_index()
+                        )
                     new_stream = None
                     try:
                         new_stream = sd.InputStream(
@@ -1601,8 +1707,8 @@ class GeminiSession:
                                 device=None,
                             )
                             new_stream.start()
-                        except Exception:
-                            print(f"Mic open failed on default device: {e}", file=sys.stderr)
+                        except Exception as fallback_error:
+                            print(f"Mic open failed on default device: {fallback_error}", file=sys.stderr)
                             new_stream = None
                     if new_stream is not None:
                         old_stream = stream
@@ -1613,7 +1719,11 @@ class GeminiSession:
                                 old_stream.close()
                             except Exception:
                                 pass
-                        print(f"Mic opened on device {self._mic_device}", file=sys.stderr)
+                        print(
+                            f"Mic opened on device {target} "
+                            f"({_input_device_name(target)})",
+                            file=sys.stderr,
+                        )
                     current_dev = self._mic_device
                 await asyncio.sleep(0.1)
         finally:
