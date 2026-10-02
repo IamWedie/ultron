@@ -13,6 +13,7 @@
     <Compile Include="..\..\Models\Conversation.cs" />
     <Compile Include="..\..\Services\AppSettings.cs" />
     <Compile Include="..\..\Services\AppLog.cs" />
+    <Compile Include="..\..\Services\CallStateRules.cs" />
     <Compile Include="..\..\Services\Secrets.cs" />
     <Compile Include="..\..\Services\MemoryStore.cs" />
     <Compile Include="..\..\Services\LongTermMemory.cs" />

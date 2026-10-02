@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Ultron.CallWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="ULTRON Call">
+
+    <Grid Background="{StaticResource UltronCharcoalBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Compact custom title bar: the call window is small, so the native
+             caption would eat a third of it. Drag region is the header only. -->
+        <Grid x:Name="CallTitleBar" Grid.Row="0" Height="32"
+              Background="{StaticResource UltronGunmetalBrush}">
+            <TextBlock Text="ULTRON" FontFamily="Consolas" FontSize="11"
+                       Foreground="#FF9BA1AB" FontWeight="SemiBold"
+                       VerticalAlignment="Center" Margin="12,0,0,0" />
+        </Grid>
+
+        <!-- Caller identity -->
+        <StackPanel Grid.Row="1" Margin="20,20,20,0" Spacing="4" HorizontalAlignment="Center">
+            <TextBlock x:Name="CallTargetText" Text="" FontFamily="Consolas" FontSize="17"
+                       Foreground="White" FontWeight="SemiBold" HorizontalAlignment="Center"
+                       TextWrapping="Wrap" MaxWidth="260" TextAlignment="Center" />
+            <TextBlock x:Name="CallStateText" Text="IDLE" FontFamily="Consolas" FontSize="11"
+                       HorizontalAlignment="Center" />
+            <!-- State dot sits beside the label, so state is never colour-only -->
+            <StackPanel Orientation="Horizontal" Spacing="7" HorizontalAlignment="Center" Margin="0,4,0,0">
+                <Ellipse x:Name="CallStateDot" Width="9" Height="9" VerticalAlignment="Center"
+                         Fill="{StaticResource UltronCrimsonBrush}" />
+                <TextBlock x:Name="CallStateLabel" Text="IDLE" FontFamily="Consolas" FontSize="11"
+                           Foreground="#FFC9CED6" VerticalAlignment="Center" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Avatar placeholder. A real photo would need the Telegram peer photo,
+             which this window does not receive yet, so this stays a glyph. -->
+        <Grid Grid.Row="2" Margin="0,8,0,0">
+            <Ellipse x:Name="CallAvatarRing" Width="96" Height="96" StrokeThickness="2"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     IsHitTestVisible="False">
+                <Ellipse.Stroke>
+                    <SolidColorBrush x:Name="CallAvatarRingBrush" Color="#4DFF2E2E" />
+                </Ellipse.Stroke>
+            </Ellipse>
+            <TextBlock x:Name="CallAvatarInitial" Text="" FontFamily="Consolas" FontSize="34"
+                       Foreground="#FFC9CED6" HorizontalAlignment="Center"
+                       VerticalAlignment="Center" IsHitTestVisible="False" />
+            <TextBlock x:Name="CallDurationText" Text="00:00" FontFamily="Consolas" FontSize="26"
+                       Foreground="White" FontWeight="SemiBold"
+                       HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                       Margin="0,0,0,8" />
+        </Grid>
+
+        <!-- Phone-style controls: green accept, red end -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center"
+                    Spacing="28" Margin="0,8,0,20">
+            <StackPanel Spacing="6" HorizontalAlignment="Center">
+                <Button x:Name="CallAcceptButton" Width="56" Height="56" CornerRadius="28"
+                        Click="CallAcceptButton_Click" Visibility="Collapsed"
+                        Background="#FF2E9E4F" BorderThickness="0"
+                        ToolTipService.ToolTip="Accept Call"
+                        AutomationProperties.Name="Accept call">
+                    <FontIcon Glyph="&#xE717;" FontSize="20" Foreground="White" />
+                </Button>
+                <TextBlock Text="Accept" FontFamily="Consolas" FontSize="10"
+                           Foreground="#FF9BA1AB" HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <StackPanel Spacing="6" HorizontalAlignment="Center">
+                <Button x:Name="CallEndButton" Width="56" Height="56" CornerRadius="28"
+                        Click="CallEndButton_Click"
+                        Background="#FFE0342E" BorderThickness="0"
+                        ToolTipService.ToolTip="End Call"
+                        AutomationProperties.Name="End call">
+                    <!-- MDL2 has no hangup glyph; the handset turned on its side is
+                         how every phone app draws it. -->
+                    <FontIcon Glyph="&#xE717;" FontSize="20" Foreground="White">
+                        <FontIcon.RenderTransform>
+                            <RotateTransform Angle="135" />
+                        </FontIcon.RenderTransform>
+                    </FontIcon>
+                </Button>
+                <TextBlock Text="End" FontFamily="Consolas" FontSize="10"
+                           Foreground="#FF9BA1AB" HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <StackPanel Spacing="6" HorizontalAlignment="Center">
+                <Button x:Name="CallMuteButton" Width="56" Height="56" CornerRadius="28"
+                        Click="CallMuteButton_Click"
+                        Background="#33FFFFFF" BorderThickness="0"
+                        ToolTipService.ToolTip="Mute Microphone"
+                        AutomationProperties.Name="Mute microphone">
+                    <FontIcon x:Name="CallMuteIcon" Glyph="&#xE720;" FontSize="20"
+                              Foreground="#FFC9CED6" />
+                </Button>
+                <TextBlock x:Name="CallMuteLabel" Text="Mute" FontFamily="Consolas" FontSize="10"
+                           Foreground="#FF9BA1AB" HorizontalAlignment="Center" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

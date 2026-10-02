@@ -138,6 +138,8 @@ public sealed partial class MainWindow
         _settings.MicMuted = _micMuted;
         try { _settings.Save(); } catch (Exception ex) { AppLog.Write("MainWindow", $"Settings save failed: {ex.Message}", AppLog.Level.Error); }
         _ = _gemini.SetMicMutedAsync(_micMuted);
+        // Keep the call window's mute button in step with the hotkey/tray toggle.
+        _callWindow?.SetMuted(_micMuted);
         DispatcherQueue.TryEnqueue(() =>
         {
             SetMicVisual(false);

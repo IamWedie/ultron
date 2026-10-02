@@ -43,13 +43,12 @@ public sealed partial class MainWindow
         btn.Background = (Microsoft.UI.Xaml.Media.SolidColorBrush)Application.Current.Resources["UltronCrimsonBrush"];
         if (btn.Content is FontIcon cur) cur.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255));
 
-        // Secondary view placeholder text.
+        // Two real destinations only: the conversation workspace and long-term
+        // memory. There is no placeholder branch left to fall into.
         (SecondaryViewTitle.Text, SecondaryViewBody.Text) = btn.Tag switch
         {
-            "commandCenter" => ("COMMAND CENTER", "Voice + text interface. Wake word, conversation mode, phone control and approvals all live here."),
-            "systemMonitor" => ("SYSTEM MONITOR", "Live process/thread/sensor telemetry charts will render here on GPU (Composition/Win2D)."),
-            "automation" => ("AUTOMATION & SCRIPTS", "Phone routines (locate, ring, SMS, screenshot, unlock) and scripted tool actions will be managed here."),
-            "directives" => ("LOGS & DIRECTIVES", "Conversation ledger, executed-command log and Ultron's directive/permission rules will land here."),
+            "commandCenter" => ("COMMAND CENTER", "Voice and text interface. Say \"Hey Ultron\" to talk, or type below. Phone control and approvals live here."),
+            "memory" => ("LONG-TERM MEMORY", "Facts Ultron has chosen to keep. Ask it to \"remember X\" in conversation, or edit the list here."),
             _ => ("", ""),
         };
 

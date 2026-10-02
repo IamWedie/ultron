@@ -53,94 +53,77 @@ public sealed partial class MainWindow
         });
     }
 
+    private CallWindow? _callWindow;
+    private bool _callWindowShown;
+
+    /// <summary>Lazily creates the call window. Created on first ring rather than
+    /// at startup so a normal session does not pay for an always-on-top window
+    /// nobody is looking at.</summary>
+    private CallWindow EnsureCallWindow()
+    {
+        if (_callWindow is not null) return _callWindow;
+
+        _callWindow = new CallWindow();
+        _callWindow.EndCallRequested += () =>
+        {
+            // The user closed the window as a way to hang up. Tell the backend
+            // once; the terminal state that follows closes it again, and a second
+            // stop would be a second "hang up" for a call that is already gone.
+            _callWindowShown = false;
+            _ = _gemini.SendTelegramCallStopAsync();
+        };
+        _callWindow.AcceptCallRequested += () =>
+            AddMessage("system", "Accepting an incoming call is not wired up yet: ULTRON only places outgoing calls.");
+        _callWindow.MuteToggledRequested += ToggleMicMute;
+        _callWindow.SetMuted(_micMuted);
+        _callWindow.ApplyIdle();
+        return _callWindow;
+    }
+
     private void HandleCallStateChanged(string state, string message)
     {
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (CallStatusOverlay is null) return;
-
-            switch (state.ToLowerInvariant())
+            try
             {
-                case "ringing":
-                    CallStatusOverlay.Visibility = Visibility.Visible;
-                    CallStatusText.Text = "RINGING";
-                    CallTargetText.Text = message;
-                    CallDurationText.Text = "00:00";
-                    _callDuration = TimeSpan.Zero;
-                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Orange);
-                    CallHangupButton.Visibility = Visibility.Visible;
-                    CallAcceptButton.Visibility = Visibility.Collapsed;
-                    CallDeclineButton.Visibility = Visibility.Collapsed;
-                    _callTimer?.Start();
-                    break;
+                var window = EnsureCallWindow();
+                if (CallStateRules.TryExtractTarget(state, message, out var target))
+                    window.SetTarget(target);
 
-                case "connecting":
-                    CallStatusText.Text = "CONNECTING";
-                    CallTargetText.Text = message;
-                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Orange);
-                    break;
+                // A new outgoing call starts from zero; a stale total from the
+                // last one would make the timer read like the call already ran.
+                if (CallStateRules.StartsNewCall(state)) _callDuration = TimeSpan.Zero;
 
-                case "connected":
-                    CallStatusText.Text = "CONNECTED";
-                    CallTargetText.Text = message;
-                    CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.LimeGreen);
-                    CallAcceptButton.Visibility = Visibility.Collapsed;
-                    CallDeclineButton.Visibility = Visibility.Collapsed;
-                    break;
+                window.ApplyState(state, message);
+                var finished = CallStateRules.IsTerminal(state);
 
-                case "remote_speech":
-                    if (message == "started")
-                        CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Cyan);
-                    else
-                        CallStatusDot.Fill = new SolidColorBrush(Microsoft.UI.Colors.LimeGreen);
-                    break;
+                // Only a real, answered call runs the duration timer.
+                if (CallStateRules.IsLive(state)) _callTimer?.Start();
+                else if (finished) _callTimer?.Stop();
 
-                case "ended":
-                case "error":
-                    CallStatusText.Text = state.ToUpperInvariant();
-                    CallTargetText.Text = message;
-                    CallStatusDot.Fill = new SolidColorBrush(state == "error" ? Microsoft.UI.Colors.Red : Microsoft.UI.Colors.Gray);
-                    CallHangupButton.Visibility = Visibility.Collapsed;
-                    _callTimer?.Stop();
-                    // Auto-hide after 5 seconds
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(5000);
-                        DispatcherQueue.TryEnqueue(() =>
-                        {
-                            if (CallStatusOverlay is not null)
-                                CallStatusOverlay.Visibility = Visibility.Collapsed;
-                        });
-                    });
-                    break;
+                // A call that fails before ringing still deserves to be seen, so
+                // the summary shows either way. Shown is tracked rather than
+                // probed because re-showing an always-on-top window would
+                // re-raise it over whatever the user moved to.
+                if (!finished || !_callWindowShown)
+                {
+                    _callWindowShown = true;
+                    window.ShowWithoutActivation();
+                }
+            }
+            catch (Exception ex)
+            {
+                // A call surface must never take down the app if it fails to open.
+                AppLog.Write("MainWindow", $"Call window update failed: {ex.Message}", AppLog.Level.Error);
             }
         });
     }
 
+    /// <summary>Single owner of the call clock. The window only displays what
+    /// lands here, so there is one ticker, not two.</summary>
     private void UpdateCallDuration()
     {
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            _callDuration = _callDuration.Add(TimeSpan.FromSeconds(1));
-            var mins = _callDuration.Minutes;
-            var secs = _callDuration.Seconds;
-            if (CallDurationText is not null)
-                CallDurationText.Text = $"{mins:D2}:{secs:D2}";
-        });
-    }
-
-    private void CallHangupButton_Click(object sender, RoutedEventArgs e)
-    {
-        _ = _gemini.SendTelegramCallStopAsync();
-    }
-
-    private void CallAcceptButton_Click(object sender, RoutedEventArgs e)
-    {
-        // For incoming calls (not implemented yet - we only do outgoing)
-    }
-
-    private void CallDeclineButton_Click(object sender, RoutedEventArgs e)
-    {
-        _ = _gemini.SendTelegramCallStopAsync();
+        _callDuration = _callDuration.Add(TimeSpan.FromSeconds(1));
+        _callWindow?.SetDuration(_callDuration);
     }
 }

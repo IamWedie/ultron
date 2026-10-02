@@ -273,7 +273,8 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         _heartbeatTimer.Tick += (_, _) => Watchdog.TouchHeartbeat();
         _heartbeatTimer.Start();
 
-        // Call duration timer
+        // Call duration timer. Sole owner of the elapsed value: the call window
+        // only displays what this pushes to it, so there is one ticker.
         _callTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _callTimer.Tick += (_, _) => UpdateCallDuration();
 
