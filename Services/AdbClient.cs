@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using Ultron.Services.Tools.Phone;
 
 namespace Ultron.Services;
 
@@ -10,28 +11,75 @@ namespace Ultron.Services;
 /// Provides ~100 operations across connection, power, screen, input, navigation,
 /// camera, clipboard, files, settings, network, calls/SMS, contacts, media, and system.
 /// </summary>
-public sealed class AdbClient
+public sealed class AdbClient : IDisposable
 {
     private readonly string _adbPath;
     private readonly string _host;
     private readonly int _port;
     private readonly string _serial;
+    private readonly string _pin;
+    private readonly string _deviceId;
     private string _cameraFacing = "back";
+    private bool _flashlightOn;
+    private DeviceProfile? _profile;
 
-    public AdbClient(string adbPath, string host, int port = 5555, string? serial = null)
+    /// <summary>
+    /// The attached device's brand/model/screen, read once from getprop and wm
+    /// output on first use. AdbClient used to hardcode the Honor camera package
+    /// and tap coordinates; the brand is now detected at runtime so the camera
+    /// operations pick the right app per vendor (see <see cref="PhoneVendors"/>).
+    /// </summary>
+    private DeviceProfile Profile
+    {
+        get
+        {
+            if (_profile is not null) return _profile;
+            _profile = DeviceProfile.FromGetprop(
+                Shell("getprop"),
+                ShellRaw("wm size"),
+                ShellRaw("wm density"));
+            return _profile;
+        }
+    }
+
+    /// <summary>
+    /// Non-empty when the last adb invocation could not prove success: the
+    /// binary was missing, the process failed to start, the command timed out,
+    /// or stderr carried an error. Cleared at the start of every invocation.
+    /// Callers that want to distinguish "did nothing" from "did it" must check
+    /// this (or the richer result surfaces added alongside).
+    /// </summary>
+    public string LastError { get; private set; } = "";
+
+    public AdbClient(string adbPath, string host, int port = 5555, string? serial = null, string? pin = null)
     {
         _adbPath = adbPath;
         _host = host;
         _port = port;
         _serial = serial ?? "";
+        _pin = pin ?? "";
+        _deviceId = string.IsNullOrWhiteSpace(host) ? _serial : $"{host}:{port}";
     }
 
     // ════════════════════════════════════════════════════════════════
     //  CORE EXECUTION
     // ════════════════════════════════════════════════════════════════
 
-    private string Run(string[] args, int timeout = 15)
+    internal string Run(string[] args, int timeout = 15, bool targetDevice = true)
     {
+        LastError = "";
+        // If the configured adb path does not exist, this would fail every call
+        // with a misleading empty string. Report it once, by construction.
+        if (!string.IsNullOrWhiteSpace(_adbPath) && !File.Exists(_adbPath))
+        {
+            LastError = $"adb not found at {_adbPath}. Install platform-tools and set the adb path in Settings → Phone.";
+            return "";
+        }
+
+        // Pin every device command to the configured transport. Without this a
+        // second attached device (or the default device) can receive the command.
+        var full = BuildArguments(args, targetDevice);
+
         try
         {
             var psi = new ProcessStartInfo
@@ -44,24 +92,54 @@ public sealed class AdbClient
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
-            foreach (var a in args) psi.ArgumentList.Add(a);
+            foreach (var a in full) psi.ArgumentList.Add(a);
             using var proc = Process.Start(psi);
-            if (proc is null) return "";
+            if (proc is null)
+            {
+                LastError = $"Could not start adb ({_adbPath}).";
+                return "";
+            }
             var stdout = proc.StandardOutput.ReadToEndAsync();
             var stderr = proc.StandardError.ReadToEndAsync();
             if (!proc.WaitForExit(timeout * 1000))
             {
                 try { proc.Kill(); } catch { }
+                LastError = $"adb command timed out after {timeout}s: adb {string.Join(' ', args)}";
                 return "";
             }
             var o = stdout.GetAwaiter().GetResult().Trim();
             var e = stderr.GetAwaiter().GetResult().Trim();
+            // A failed command must never read as an empty success. Shell
+            // pipelines are exempt: `grep`/`find` exit non-zero when there is
+            // simply nothing to report (e.g. no Wi-Fi status line).
+            var piped = args.Any(a => a.Contains('|'));
+            if (proc.ExitCode != 0 && !piped)
+            {
+                LastError = string.IsNullOrWhiteSpace(e)
+                    ? $"adb exited with code {proc.ExitCode}: adb {string.Join(' ', args)}"
+                    : e;
+                return o;
+            }
+            // A real error on stderr is not "empty output" - surface it.
+            if (string.IsNullOrEmpty(o) && !string.IsNullOrEmpty(e))
+            {
+                LastError = e;
+                return "";
+            }
             return string.IsNullOrEmpty(o) ? e : o;
         }
-        catch
+        catch (Exception ex)
         {
+            LastError = $"adb invocation failed: {ex.Message}";
             return "";
         }
+    }
+
+    internal string[] BuildArguments(string[] args, bool targetDevice)
+    {
+        if (targetDevice && !string.IsNullOrEmpty(_deviceId))
+            return ["-s", _deviceId, .. args];
+        return args;
     }
 
     private static readonly string[] ShellArg = ["shell"];
@@ -81,24 +159,26 @@ public sealed class AdbClient
     //  CONNECTION
     // ════════════════════════════════════════════════════════════════
 
-    public bool IsConnected()
+    public bool IsConnected() => DeviceListContains(Run(DevicesArg, 15, targetDevice: false), _deviceId);
+
+    internal static bool DeviceListContains(string devicesOutput, string? deviceId)
     {
-        var out1 = Run(DevicesArg);
-        foreach (var line in out1.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var line in devicesOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             var t = line.Trim();
             if (string.IsNullOrEmpty(t)) continue;
             if (t.StartsWith("List of", StringComparison.Ordinal) || t.StartsWith("* ", StringComparison.Ordinal)) continue;
-            if (t.Contains("device") && !t.Contains("offline")) return true;
+            var parts = t.Split(['\t', ' '], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !parts[1].StartsWith("device", StringComparison.Ordinal)) continue;
+            if (string.IsNullOrEmpty(deviceId) || string.Equals(parts[0], deviceId, StringComparison.Ordinal)) return true;
         }
         return false;
     }
 
     private bool ConnectRaw(int timeout = 8)
     {
-        var result = Run(new[] { "connect", $"{_host}:{_port}" }, timeout);
-        return result.Contains("connected", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("already connected", StringComparison.OrdinalIgnoreCase);
+        var result = Run(["connect", $"{_host}:{_port}"], timeout, targetDevice: false);
+        return result.Contains("connected", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool VerifySerial()
@@ -110,19 +190,16 @@ public sealed class AdbClient
 
     private void DisconnectRaw()
     {
-        try { Run(new[] { "disconnect", $"{_host}:{_port}" }, 8); } catch { }
+        try { Run(["disconnect", $"{_host}:{_port}"], 8, targetDevice: false); } catch { }
     }
 
     public bool Connect()
     {
-        if (IsConnected()) return true;
-        var addr = _host;
-        if (string.IsNullOrEmpty(addr)) return false;
-        if (ConnectRaw())
-        {
-            if (VerifySerial()) return true;
-            DisconnectRaw();
-        }
+        if (string.IsNullOrWhiteSpace(_host)) return false;
+        if (IsConnected() && VerifySerial()) return true;
+        if (!ConnectRaw()) return false;
+        if (VerifySerial()) return true;
+        DisconnectRaw();
         return false;
     }
 
@@ -132,6 +209,11 @@ public sealed class AdbClient
     }
 
     public void Disconnect() => DisconnectRaw();
+
+    public void Dispose()
+    {
+        try { DisconnectRaw(); } catch { /* best effort */ }
+    }
 
     // ════════════════════════════════════════════════════════════════
     //  POWER
@@ -237,7 +319,12 @@ public sealed class AdbClient
     {
         Shell("input keyevent KEYCODE_WAKEUP");
         Thread.Sleep(500);
-        Shell("input swipe 540 2000 540 500 300");
+        var w = Profile.ScreenWidth;
+        var h = Profile.ScreenHeight;
+        var x = w > 0 ? w / 2 : 540;
+        var fromY = h > 0 ? (int)(h * 0.85) : 2000;
+        var toY = h > 0 ? (int)(h * 0.25) : 500;
+        Shell($"input swipe {x} {fromY} {x} {toY} 300");
         Thread.Sleep(1000);
         ShellRaw($"input text {AdbShell.Quote(pin)}");
         Thread.Sleep(300);
@@ -271,22 +358,28 @@ public sealed class AdbClient
     public string Screenshot()
     {
         const string remote = "/sdcard/ultron_screenshot.png";
-        var local = Path.Combine(Path.GetTempPath(), "ultron_screenshot.png");
+        var local = Path.Combine(Path.GetTempPath(), $"ultron_screenshot_{Guid.NewGuid():N}.png");
         ShellRaw($"screencap -p {AdbShell.Quote(remote)}");
-        Run(new[] { "pull", remote, local });
+        if (!string.IsNullOrEmpty(LastError)) return $"Screenshot failed: {LastError}";
+        Run(["pull", remote, local]);
+        var error = LastError;
         ShellRaw($"rm {AdbShell.Quote(remote)}");
-        return File.Exists(local) ? local : "Screenshot failed.";
+        if (string.IsNullOrEmpty(error) && File.Exists(local)) return local;
+        return $"Screenshot failed: {(string.IsNullOrEmpty(error) ? "no file was produced" : error)}";
     }
 
     public string ScreenRecord(int seconds = 10)
     {
-        seconds = Math.Min(seconds, 180);
+        seconds = Math.Clamp(seconds, 1, 180);
         const string remote = "/sdcard/ultron_recording.mp4";
-        var local = Path.Combine(Path.GetTempPath(), "ultron_recording.mp4");
-        ShellRaw($"screenrecord --time-limit {seconds} {AdbShell.Quote(remote)}");
-        Run(new[] { "pull", remote, local });
+        var local = Path.Combine(Path.GetTempPath(), $"ultron_recording_{Guid.NewGuid():N}.mp4");
+        ShellRaw($"screenrecord --time-limit {seconds} {AdbShell.Quote(remote)}", seconds + 20);
+        if (!string.IsNullOrEmpty(LastError)) return $"Recording failed: {LastError}";
+        Run(["pull", remote, local]);
+        var error = LastError;
         ShellRaw($"rm {AdbShell.Quote(remote)}");
-        return File.Exists(local) ? local : "Recording failed.";
+        if (string.IsNullOrEmpty(error) && File.Exists(local)) return local;
+        return $"Recording failed: {(string.IsNullOrEmpty(error) ? "no file was produced" : error)}";
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -416,48 +509,76 @@ public sealed class AdbClient
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  CAMERA
+    //  CAMERA  (vendor-aware: the launch package and tap points come from the
+    //           detected brand/screen, not from hardcoded Honor coordinates)
     // ════════════════════════════════════════════════════════════════
+
+    private (int X, int Y) ShutterPoint()
+    {
+        var w = Profile.ScreenWidth;
+        var h = Profile.ScreenHeight;
+        if (w <= 0 || h <= 0) return (540, 2200); // legacy fallback when no size is known
+        return (w / 2, (int)(h * 0.78));
+    }
+
+    private (int X, int Y) FlipPoint()
+    {
+        var w = Profile.ScreenWidth;
+        var h = Profile.ScreenHeight;
+        if (w <= 0 || h <= 0) return (950, 2100); // legacy fallback when no size is known
+        return ((int)(w * 0.9), (int)(h * 0.35));
+    }
 
     public string OpenCamera()
     {
         _cameraFacing = "back";
-        var comp = ResolveLaunchIntent("com.hihonor.camera");
-        if (comp is not null) { ShellRaw($"am start -n {AdbShell.Quote(comp)}"); return "Camera opened."; }
-        var r = ShellRaw("am start -n com.hihonor.camera/.Camera");
-        if (r.Contains("Error"))
-            r = ShellRaw("am start -a android.media.action.STILL_IMAGE_CAMERA");
-        return !r.Contains("Error") ? "Camera opened." : $"Camera failed: {r}";
+        var package = PhoneVendors.CameraPackage(Profile);
+        if (package is not null)
+        {
+            var component = ResolveLaunchIntent(package) ?? $"{package}/.Camera";
+            var launched = ShellRaw($"am start -n {AdbShell.Quote(component)}");
+            if (ShellFailure(launched) is null) return "Camera opened.";
+        }
+        var fallback = ShellRaw($"am start -a {AdbShell.Quote(PhoneVendors.GenericCameraIntent)}");
+        return ShellFailure(fallback) ?? "Camera opened.";
     }
 
     public string TakePhoto()
     {
         Thread.Sleep(500);
-        Shell("input tap 540 2200");
+        var (x, y) = ShutterPoint();
+        Shell($"input tap {x} {y}");
         Thread.Sleep(1000);
-        return "Photo taken.";
+        return string.IsNullOrEmpty(LastError) ? "Photo taken." : $"Photo failed: {LastError}";
     }
 
     public string TakeSelfie()
     {
         Thread.Sleep(500);
-        if (_cameraFacing != "front") { Shell("input tap 950 2100"); Thread.Sleep(1000); }
-        Shell("input tap 540 2200");
+        var (fx, fy) = FlipPoint();
+        var (sx, sy) = ShutterPoint();
+        if (_cameraFacing != "front") { Shell($"input tap {fx} {fy}"); Thread.Sleep(1000); }
+        Shell($"input tap {sx} {sy}");
         Thread.Sleep(1000);
-        return "Selfie taken.";
+        return string.IsNullOrEmpty(LastError) ? "Selfie taken." : $"Selfie failed: {LastError}";
     }
 
     public string ToggleFlash()
     {
-        ShellRaw("am broadcast -a com.hihonor.camera.FLASH_TOGGLE");
+        var action = PhoneVendors.FlashToggleAction(Profile);
+        if (action is null)
+            return "Flash toggle is not available on this phone brand (no documented flash broadcast).";
+        var output = ShellRaw($"am broadcast -a {AdbShell.Quote(action)}");
         Thread.Sleep(500);
-        return "Flash toggled.";
+        return ShellFailure(output) ?? "Flash toggled.";
     }
 
     public string SwitchCamera()
     {
-        Shell("input tap 950 2100");
+        var (x, y) = FlipPoint();
+        Shell($"input tap {x} {y}");
         Thread.Sleep(1000);
+        if (!string.IsNullOrEmpty(LastError)) return $"Camera switch failed: {LastError}";
         _cameraFacing = _cameraFacing == "back" ? "front" : "back";
         return $"Camera switched to {_cameraFacing}.";
     }
@@ -470,10 +591,11 @@ public sealed class AdbClient
         if (!IsScreenOn()) { ScreenOn(); Thread.Sleep(1000); }
         if (IsLocked())
         {
-            var pin = "";
-            if (string.IsNullOrEmpty(pin))
-                return "Phone is locked and PHONE_PIN is not set — configure it to auto-unlock for selfies.";
-            UnlockWithPin(pin);
+            if (string.IsNullOrEmpty(_pin))
+                return "Phone is locked and no phone PIN is configured — set it in Settings → Phone.";
+            var unlocked = UnlockWithPin(_pin);
+            if (unlocked.Contains("still showing", StringComparison.OrdinalIgnoreCase))
+                return unlocked;
             Thread.Sleep(2000);
         }
         if (IsInUse()) return "Phone in use, try again later.";
@@ -495,13 +617,15 @@ public sealed class AdbClient
 
     public string RecordVideo(int seconds = 10)
     {
+        seconds = Math.Clamp(seconds, 1, 180);
+        var (x, y) = ShutterPoint();
         Thread.Sleep(500);
-        Shell("input tap 540 2200");
+        Shell($"input tap {x} {y}");
         Thread.Sleep(500);
         Shell("input keyevent KEYCODE_CAMERA");
         Thread.Sleep(seconds * 1000);
         Shell("input keyevent KEYCODE_CAMERA");
-        return $"Recorded {seconds}s video.";
+        return string.IsNullOrEmpty(LastError) ? $"Recorded {seconds}s video." : $"Recording failed: {LastError}";
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -544,7 +668,9 @@ public sealed class AdbClient
 
     public string ListFiles(string path = "/sdcard/")
     {
+        if (string.IsNullOrWhiteSpace(path)) path = "/sdcard/";
         var out1 = ShellRaw($"ls -la {AdbShell.Quote(path)}");
+        if (!string.IsNullOrEmpty(LastError)) return $"Could not list {path}: {LastError}";
         return !string.IsNullOrEmpty(out1) ? out1 : $"Could not list {path}";
     }
 
@@ -577,16 +703,21 @@ public sealed class AdbClient
 
     public string PullFile(string phonePath, string? localDir = null)
     {
+        if (string.IsNullOrWhiteSpace(phonePath)) return "A phone path is required.";
         localDir ??= Path.GetTempPath();
-        var local = Path.Combine(localDir, Path.GetFileName(phonePath));
-        Run(new[] { "pull", phonePath, local });
-        return File.Exists(local) ? local : $"Failed to pull {phonePath}.";
+        var name = Path.GetFileName(phonePath.TrimEnd('/'));
+        if (string.IsNullOrWhiteSpace(name)) return $"Cannot pull a directory: {phonePath}";
+        var local = Path.Combine(localDir, name);
+        Run(["pull", phonePath, local]);
+        if (!string.IsNullOrEmpty(LastError)) return $"Failed to pull {phonePath}: {LastError}";
+        return File.Exists(local) || Directory.Exists(local) ? local : $"Failed to pull {phonePath}.";
     }
 
     public string PushFile(string localPath, string phonePath = "/sdcard/Download/")
     {
-        Run(new[] { "push", localPath, phonePath });
-        return $"Pushed to {phonePath}.";
+        if (!File.Exists(localPath)) return $"Local file not found: {localPath}";
+        Run(["push", localPath, phonePath]);
+        return string.IsNullOrEmpty(LastError) ? $"Pushed to {phonePath}." : $"Push failed: {LastError}";
     }
 
     public string CreateFolder(string path) { ShellRaw($"mkdir -p {AdbShell.Quote(path)}"); return $"Created {path}."; }
@@ -628,15 +759,24 @@ public sealed class AdbClient
     public string DndOn() { ShellRaw("settings put global zen_mode 2"); return "Do Not Disturb ON."; }
     public string DndOff() { ShellRaw("settings put global zen_mode 0"); return "Do Not Disturb OFF."; }
 
-    public string FlashlightOn()
-    {
-        ShellRaw("cmd statusbar expand-notifications");
-        Thread.Sleep(500);
-        ShellRaw("input tap 540 1200");
-        return "Flashlight toggled (via quick settings).";
-    }
+    public string FlashlightOn() => SetFlashlight(true);
+    public string FlashlightOff() => SetFlashlight(false);
 
-    public string FlashlightOff() => FlashlightOn();
+    private string SetFlashlight(bool on)
+    {
+        if (_flashlightOn == on) return $"Flashlight already {(on ? "on" : "off")}.";
+        ShellRaw("cmd statusbar expand-notifications");
+        if (!string.IsNullOrEmpty(LastError)) return $"Flashlight toggle failed: {LastError}";
+        Thread.Sleep(500);
+        var w = Profile.ScreenWidth;
+        var h = Profile.ScreenHeight;
+        var x = w > 0 ? w / 2 : 540;
+        var y = h > 0 ? (int)(h * 0.5) : 1200;
+        Shell($"input tap {x} {y}");
+        if (!string.IsNullOrEmpty(LastError)) return $"Flashlight toggle failed: {LastError}";
+        _flashlightOn = on;
+        return $"Flashlight {(on ? "on" : "off")}.";
+    }
 
     public string LocationOn() { ShellRaw("settings put secure location_mode 3"); return "Location turned on."; }
     public string LocationOff() { ShellRaw("settings put secure location_mode 0"); return "Location turned off."; }
@@ -705,23 +845,39 @@ public sealed class AdbClient
     //  CALLS & SMS
     // ════════════════════════════════════════════════════════════════
 
-    public string MakeCall(string number) { ShellRaw($"am start -a android.intent.action.CALL -d {AdbShell.Quote("tel:" + number)}"); return $"Calling {number}..."; }
+    public string MakeCall(string number)
+    {
+        if (string.IsNullOrWhiteSpace(number)) return "A phone number is required.";
+        var output = ShellRaw($"am start -a android.intent.action.CALL -d {AdbShell.Quote("tel:" + number)}");
+        return ShellFailure(output) ?? $"Calling {number}...";
+    }
+
     public string PhoneCall(string number) => MakeCall(number);
+
+    private string? ShellFailure(string output) =>
+        !string.IsNullOrEmpty(LastError) ? $"Phone command failed: {LastError}"
+        : output.Contains("Error", StringComparison.OrdinalIgnoreCase)
+          || output.Contains("Exception", StringComparison.OrdinalIgnoreCase)
+            ? $"Phone command failed: {output}"
+            : null;
     public string AnswerCall() { ShellRaw("input keyevent KEYCODE_CALL"); return "Call answered."; }
     public string RejectCall() { ShellRaw("input keyevent KEYCODE_ENDCALL"); return "Call rejected."; }
     public string EndCall() { ShellRaw("input keyevent KEYCODE_ENDCALL"); return "Call ended."; }
 
     public string SendSms(string number, string message)
     {
-        ShellRaw($"am start -a android.intent.action.SENDTO -d {AdbShell.Quote("sms:" + number)} --es sms_body {AdbShell.Quote(message)} --ez exit_on_sent true");
-        return $"SMS to {number}: {message}";
+        if (string.IsNullOrWhiteSpace(number)) return "A phone number is required.";
+        var output = ShellRaw($"am start -a android.intent.action.SENDTO -d {AdbShell.Quote("sms:" + number)} --es sms_body {AdbShell.Quote(message)} --ez exit_on_sent true");
+        return ShellFailure(output) ?? $"SMS sent to {number}.";
     }
 
     public string ReadSms(int limit = 20)
     {
-        var out1 = ShellRaw($"content query --uri content://sms/inbox --projection date,address,body --limit {limit}");
+        var take = Math.Clamp(limit, 1, 100);
+        var out1 = ShellRaw($"content query --uri content://sms/inbox --projection date,address,body --limit {take}");
+        if (!string.IsNullOrEmpty(LastError)) return $"Could not read SMS: {LastError}";
         if (string.IsNullOrEmpty(out1)) return "No SMS available.";
-        return string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(20));
+        return string.Join("\n", out1.Split('\n', StringSplitOptions.RemoveEmptyEntries).Take(take));
     }
 
     public string ReadNotifications()

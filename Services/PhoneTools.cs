@@ -7,6 +7,65 @@ public static class PhoneTools
 {
     public static IReadOnlyList<ToolDef> All { get; } = Build();
 
+    private static readonly string[] CuratedNames =
+    [
+        // info / device
+        "phone_device_info",
+        "phone_battery",
+        // screen
+        "phone_screen_on",
+        "phone_screen_off",
+        "phone_screenshot",
+        "phone_unlock",
+        // input
+        "phone_home",
+        "phone_back",
+        "phone_tap",
+        "phone_swipe_up",
+        "phone_swipe_down",
+        "phone_type",
+        // apps
+        "phone_open_app",
+        "phone_current_activity",
+        // camera
+        "phone_open_camera",
+        "phone_take_photo",
+        "phone_take_selfie",
+        "phone_selfie_verify",
+        "phone_switch_camera",
+        "phone_toggle_flash",
+        // files
+        "phone_list_files",
+        "phone_pull_file",
+        "phone_push_file",
+        // calls & sms
+        "phone_make_call",
+        "phone_send_sms",
+        "phone_read_sms",
+        // settings toggles
+        "phone_wifi_on",
+        "phone_wifi_off",
+        "phone_wifi_status",
+        "phone_bluetooth_on",
+        "phone_bluetooth_off",
+        "phone_dnd_on",
+        "phone_dnd_off",
+        "phone_flashlight_on",
+        "phone_flashlight_off",
+    ];
+
+    /// <summary>
+    /// The subset of <see cref="All"/> actually exposed to the model. The full
+    /// catalog is ~122 tools; declaring all of them bloats model context and
+    /// widens the risk surface, so the spec ships a curated set covering info,
+    /// screen, input, apps, camera, files, calls/SMS and common toggles.
+    /// </summary>
+    public static IReadOnlyList<ToolDef> Curated { get; } =
+        All
+            .Where(t => CuratedNames.Contains(t.Name))
+            .OrderBy(t => Array.IndexOf(CuratedNames, t.Name))
+            .ToList();
+
     private static ToolDef NoArgs(string name, string desc = "") => new()
     {
         Name = name,
@@ -41,8 +100,6 @@ public static class PhoneTools
             // NoArgs("phone_reboot_bootloader", "Reboot the phone into bootloader mode."),
             // NoArgs("phone_shutdown", "Power off the phone."),
             // NoArgs("phone_safe_mode", "Reboot the phone into safe mode."),
-            NoArgs("phone_screen_on", "Wake the phone screen."),
-            NoArgs("phone_screen_off", "Turn the phone screen off."),
             // SCREEN
             NoArgs("phone_screen_on", "Wake the phone screen."),
             NoArgs("phone_screen_off", "Turn the phone screen off."),

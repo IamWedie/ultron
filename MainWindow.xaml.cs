@@ -8,6 +8,7 @@ using Ultron.Services;
 using Ultron.Services.Apps;
 using Ultron.Services.Processes;
 using Ultron.Services.Tools.Apps;
+using Ultron.Services.Tools.Phone;
 using Windows.System;
 using Windows.UI;
 using Microsoft.UI;
@@ -357,8 +358,7 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             new DelegateToolHandler(name, (_, _) => ToolResult.Ok(message));
 
         return new ToolRouter(
-            new IToolHandler[]
-            {
+            [
                 // memory
                 Sync("save_memory", HandleSaveMemory),
                 Sync("recall_memory", HandleRecallMemory),
@@ -390,9 +390,42 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                 Passthrough("screen_process", "Vision handled by the backend."),
                 Passthrough("close_camera", "Camera closed."),
                 Passthrough("set_voice", "Voice handled by the backend."),
-            },
+                // phone bridge (ADB). Always registered because the backend always
+                // declares the phone tools; when disabled/unconfigured the handlers
+                // return the reason. The bridge surfaces real failures instead of
+                // empty successes (see AdbClient.LastError / AdbPhone).
+                ..BuildPhoneHandlers(),
+            ],
             new PolicyEngine(),
             this);
+    }
+
+    /// <summary>
+    /// The curated ADB phone tool handlers. They are always registered because
+    /// the backend always declares the phone tools: when the bridge is disabled
+    /// or adb is missing, the handlers answer with the reason instead of the
+    /// router reporting "Unknown tool". One handler per curated tool, all
+    /// sharing a single AdbClient so a connection is only opened once per request.
+    /// </summary>
+    private IEnumerable<IToolHandler> BuildPhoneHandlers()
+    {
+        if (!_settings.PhoneEnabled)
+            return new PhoneToolService(new UnavailablePhone("Phone control is disabled in Settings → Phone.")).Handlers;
+
+        if (string.IsNullOrWhiteSpace(_settings.PhoneAddr))
+            return new PhoneToolService(new UnavailablePhone("The phone's Wi-Fi address is not configured (Settings → Phone).")).Handlers;
+
+        var adbPath = PhoneProbe.ResolveAdb(
+            _settings.PhoneAdbPath,
+            Environment.GetEnvironmentVariable("PATH") ?? "",
+            PhoneProbe.DefaultCommonDirs);
+        if (string.IsNullOrWhiteSpace(adbPath))
+            return new PhoneToolService(new UnavailablePhone(PhoneProbe.MissingMessage())).Handlers;
+
+        var client = new AdbClient(adbPath, _settings.PhoneAddr, _settings.PhonePort,
+            string.IsNullOrWhiteSpace(_settings.PhoneSerial) ? null : _settings.PhoneSerial,
+            string.IsNullOrWhiteSpace(_settings.PhonePin) ? null : _settings.PhonePin);
+        return new PhoneToolService(new AdbPhone(client, new UserProfilePathPolicy())).Handlers;
     }
 
     private async void LoadModelsAsync()
@@ -701,6 +734,102 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
         _tgCodePanel = tgCodePanel;
         _tgCodeBox = tgCodeBox;
 
+        // ---------- PHONE BRIDGE (ADB, over Wi-Fi) ----------
+        var phMuted = tgMuted;
+        var phAccent = tgAccent;
+        var phEnabled = new ToggleSwitch { Header = "Enable ADB phone bridge", IsOn = _settings.PhoneEnabled };
+        var phAddr = new TextBox { Text = _settings.PhoneAddr, Width = 360, PlaceholderText = "192.168.1.50" };
+        var phPort = new TextBox { Text = _settings.PhonePort.ToString(), Width = 80, PlaceholderText = "5555" };
+        var phSerial = new TextBox { Text = _settings.PhoneSerial, Width = 360, PlaceholderText = "optional serial (several devices connected)" };
+        var phAdbPath = new TextBox { Text = _settings.PhoneAdbPath, Width = 360, PlaceholderText = "optional explicit path to adb.exe" };
+        var phPin = new PasswordBox { Password = _settings.PhonePin, Width = 360, PlaceholderText = "optional lock-screen PIN (used by selfie verification)" };
+        var phStatus = new TextBlock
+        {
+            FontFamily = font,
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = phMuted,
+            Text = _settings.PhoneEnabled ? "Not tested yet." : "Phone bridge is off.",
+        };
+        var phTest = new Button { Content = "Test Connection", Padding = new Thickness(8, 6, 8, 6) };
+        var phHint = new TextBlock
+        {
+            FontFamily = font,
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = phMuted,
+            Text = "Wireless pairing: enable 'Wireless debugging' under Developer options on the phone, then " +
+                   "pair via the address:port shown there (and the pairing code if asked). adb ships with " +
+                   "Android platform-tools (developer.android.com/tools/releases/platform-tools) — install it " +
+                   "and either add adb.exe to PATH or enter its path below. Address + port + adb are enough " +
+                   "to connect.",
+        };
+        phTest.Click += async (_, _) =>
+        {
+            phTest.IsEnabled = false;
+            phStatus.Foreground = phMuted;
+            phStatus.Text = "Testing adb + connection…";
+            var addr = phAddr.Text.Trim();
+            int.TryParse(phPort.Text.Trim(), out var port);
+            if (port <= 0) port = 5555;
+            var adbPath = PhoneProbe.ResolveAdb(
+                phAdbPath.Text.Trim(),
+                Environment.GetEnvironmentVariable("PATH") ?? "",
+                PhoneProbe.DefaultCommonDirs);
+            if (string.IsNullOrWhiteSpace(adbPath))
+            {
+                phStatus.Text = PhoneProbe.MissingMessage();
+                phStatus.Foreground = phAccent;
+                phTest.IsEnabled = true;
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(addr))
+            {
+                phStatus.Text = "Enter the phone's IP address first.";
+                phStatus.Foreground = phAccent;
+                phTest.IsEnabled = true;
+                return;
+            }
+            await Task.Run(() =>
+            {
+                try
+                {
+                    using var client = new AdbClient(
+                        adbPath, addr, port,
+                        string.IsNullOrWhiteSpace(phSerial.Text) ? null : phSerial.Text.Trim(),
+                        string.IsNullOrWhiteSpace(phPin.Password) ? null : phPin.Password.Trim());
+                    if (!client.Connect())
+                    {
+                        DispatcherQueue.TryEnqueue(() =>
+                        {
+                            phStatus.Text = string.IsNullOrEmpty(client.LastError)
+                                ? "Phone not reachable over ADB."
+                                : $"Failed: {client.LastError}";
+                            phStatus.Foreground = phAccent;
+                            phTest.IsEnabled = true;
+                        });
+                        return;
+                    }
+                    var info = client.DeviceInfo();
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        phStatus.Text = "Connected. " + info;
+                        phStatus.Foreground = phMuted;
+                        phTest.IsEnabled = true;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        phStatus.Text = "Failed: " + ex.Message;
+                        phStatus.Foreground = phAccent;
+                        phTest.IsEnabled = true;
+                    });
+                }
+            });
+        };
+
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -765,6 +894,20 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
                         memoryToggle,
                         memoryScopeNote,
                         purgeBtn,
+                        Lbl("PHONE BRIDGE — control the user's phone over ADB (Wi-Fi):"),
+                        phEnabled,
+                        Lbl("Wi-Fi address (from Wireless debugging on the phone):"),
+                        phAddr,
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Lbl("Port:", 11), phPort } },
+                        Lbl("Serial (optional, only if several devices are connected):"),
+                        phSerial,
+                        Lbl("Path to adb.exe (optional — else PATH then standard install locations):"),
+                        phAdbPath,
+                        Lbl("Lock-screen PIN (optional, for selfie verification):"),
+                        phPin,
+                        phHint,
+                        new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { phTest } },
+                        phStatus,
                     }
                 },
             },
@@ -776,9 +919,24 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             var key = keyBox.Text.Trim();
             var previousKey = _settings.GeminiApiKey;
             var previousVoice = _settings.GeminiVoice;
+            var phoneCfgChanged = false;
             lock (_settings)
             {
                 _settings.MemoryLogging = memoryToggle.IsOn;
+                var phoneWasEnabled = _settings.PhoneEnabled;
+                _settings.PhoneEnabled = phEnabled.IsOn;
+                phoneCfgChanged = phoneWasEnabled != _settings.PhoneEnabled
+                    || _settings.PhoneAddr != phAddr.Text.Trim()
+                    || _settings.PhonePort.ToString() != phPort.Text.Trim()
+                    || _settings.PhoneAdbPath != phAdbPath.Text.Trim()
+                    || _settings.PhoneSerial != phSerial.Text.Trim()
+                    || _settings.PhonePin != phPin.Password.Trim();
+                _settings.PhoneAddr = phAddr.Text.Trim();
+                int.TryParse(phPort.Text.Trim(), out var phPortParsed);
+                if (phPortParsed > 0) _settings.PhonePort = phPortParsed;
+                _settings.PhoneSerial = phSerial.Text.Trim();
+                _settings.PhoneAdbPath = phAdbPath.Text.Trim();
+                _settings.PhonePin = phPin.Password.Trim();
                 _settings.TelegramCallEnabled = tgToggle.IsOn;
                 _settings.CallFallbackEnabled = tgFallbackEnabled.IsOn;
                 int.TryParse(tgFallbackThreshold.Text.Trim(), out var fbThr);
@@ -830,6 +988,8 @@ public sealed partial class MainWindow : Window, IApprovalService, ILaunchedWind
             }
             else
                 AddMessage("system", "Settings saved.");
+            if (phoneCfgChanged)
+                AddMessage("system", "Phone bridge settings saved — restart ULTRON to apply (also needs the phone paired + adb installed).");
         };
         try
         {

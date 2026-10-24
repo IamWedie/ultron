@@ -76,6 +76,8 @@ public class AdbShellQuoteTests
         {
             "level", "degrees", "x", "y", "x1", "y1", "x2", "y2",
             "durationMs", "auto", "limit", "lines", "ms", "seconds",
+            "fx", "fy", "sx", "sy", // camera tap points - integer coords
+            "fromY", "toY", "take", // derived integer coordinates / clamped limit
         };
 
         var offenders = new System.Collections.Generic.List<string>();

@@ -40,6 +40,12 @@ public sealed class AppSettings
     public int PhonePort { get; set; } = 5555;
     public string PhoneSerial { get; set; } = "";
     public string PhonePin { get; set; } = "";
+    /// <summary>Optional explicit path to adb.exe. When empty, PhoneProbe falls
+    /// back to PATH and then standard install locations.</summary>
+    public string PhoneAdbPath { get; set; } = "";
+    /// <summary>Master switch for the ADB phone bridge. While off, phone tools
+    /// answer "disabled" instead of touching the device.</summary>
+    public bool PhoneEnabled { get; set; }
     public string Number { get; set; } = "";
     public int EngagedTimeoutSeconds { get; set; } = 120;
 

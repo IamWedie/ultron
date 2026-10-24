@@ -821,6 +821,85 @@ TOOL_DECLARATIONS = [
 ]
 
 # ============================================================
+# PHONE BRIDGE TOOLS (executed in C# via the tool_call IPC)
+# ============================================================
+
+def _phone_tool(name, description, properties=None, required=None):
+    """Build a phone tool declaration matching the C# ToolDef shape."""
+    return {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "OBJECT",
+            "properties": properties or {},
+            "required": required or [],
+        },
+    }
+
+
+PHONE_TOOL_DECLARATIONS = [
+    # info / device
+    _phone_tool("phone_device_info", "Return the user's phone brand, model, Android version, resolution, density and battery."),
+    _phone_tool("phone_battery", "Return the user's phone battery level, charging status, temperature, voltage and health."),
+    # screen
+    _phone_tool("phone_screen_on", "Wake the user's phone screen."),
+    _phone_tool("phone_screen_off", "Turn the user's phone screen off."),
+    _phone_tool("phone_screenshot", "Take a screenshot of the user's phone screen."),
+    _phone_tool("phone_unlock", "Wake the user's phone and swipe to unlock (swipe-only lock screens)."),
+    # input
+    _phone_tool("phone_home", "Press the phone home button."),
+    _phone_tool("phone_back", "Press the phone back button."),
+    _phone_tool("phone_tap", "Tap at absolute screen coordinates on the phone.",
+                {"x": {"type": "INTEGER", "description": "X coordinate in phone pixels"},
+                 "y": {"type": "INTEGER", "description": "Y coordinate in phone pixels"}},
+                ["x", "y"]),
+    _phone_tool("phone_swipe_up", "Swipe up on the phone screen."),
+    _phone_tool("phone_swipe_down", "Swipe down on the phone screen."),
+    _phone_tool("phone_type", "Type text into the phone's focused input field.",
+                {"text": {"type": "STRING", "description": "Text to type"}}, ["text"]),
+    # apps
+    _phone_tool("phone_open_app", "Open an app on the user's phone by package name or alias (camera/settings/chrome/phone/contacts/messages/gallery/youtube).",
+                {"package": {"type": "STRING", "description": "Package name or alias"}}, ["package"]),
+    _phone_tool("phone_current_activity", "Return the currently open app/activity on the phone."),
+    # camera
+    _phone_tool("phone_open_camera", "Open the user's phone camera app (uses the correct camera app for the brand)."),
+    _phone_tool("phone_take_photo", "Take a photo with the user's phone camera."),
+    _phone_tool("phone_take_selfie", "Take a selfie with the phone's front camera."),
+    _phone_tool("phone_selfie_verify", "Wake, unlock, and take a verified selfie of the user."),
+    _phone_tool("phone_switch_camera", "Switch the phone camera between front and back."),
+    _phone_tool("phone_toggle_flash", "Toggle the phone camera flash."),
+    # files
+    _phone_tool("phone_list_files", "List files in a phone directory (default /sdcard/).",
+                {"path": {"type": "STRING", "description": "Optional phone directory"}}),
+    _phone_tool("phone_pull_file", "Copy a file from the phone to the PC.",
+                {"path": {"type": "STRING", "description": "Path on the phone"}}, ["path"]),
+    _phone_tool("phone_push_file", "Copy a local PC file to the phone.",
+                {"local": {"type": "STRING", "description": "Path on the PC"},
+                 "remote": {"type": "STRING", "description": "Optional destination path on the phone"}},
+                ["local"]),
+    # calls & sms
+    _phone_tool("phone_make_call", "Place a phone call from the user's phone.",
+                {"number": {"type": "STRING", "description": "Phone number to call"}}, ["number"]),
+    _phone_tool("phone_send_sms", "Send an SMS from the user's phone.",
+                {"number": {"type": "STRING", "description": "Recipient phone number"},
+                 "message": {"type": "STRING", "description": "SMS text"}},
+                ["number", "message"]),
+    _phone_tool("phone_read_sms", "Read recent SMS from the user's phone inbox."),
+    # toggles
+    _phone_tool("phone_wifi_on", "Turn the phone's Wi-Fi on."),
+    _phone_tool("phone_wifi_off", "Turn the phone's Wi-Fi off."),
+    _phone_tool("phone_wifi_status", "Return the phone's Wi-Fi status."),
+    _phone_tool("phone_bluetooth_on", "Turn the phone's Bluetooth on."),
+    _phone_tool("phone_bluetooth_off", "Turn the phone's Bluetooth off."),
+    _phone_tool("phone_dnd_on", "Turn the phone's Do Not Disturb on."),
+    _phone_tool("phone_dnd_off", "Turn the phone's Do Not Disturb off."),
+    _phone_tool("phone_flashlight_on", "Turn the phone's flashlight on."),
+    _phone_tool("phone_flashlight_off", "Turn the phone's flashlight off."),
+]
+
+TOOL_DECLARATIONS += PHONE_TOOL_DECLARATIONS
+
+# ============================================================
 # MEMORY SYSTEM
 # ============================================================
 
@@ -1920,8 +1999,6 @@ class GeminiSession:
                                     else:
                                         self._mic_device = idx
                                         result = f"Switched input device to index {idx}."
-                                elif fc.name == "flight_finder":
-                                    result = self._handle_flight_finder(args)
                                 else:
                                     _send_event({
                                         "type": "tool_call",

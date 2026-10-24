@@ -31,6 +31,13 @@
     <Compile Include="..\..\Services\Tools\ToolRouter.cs" />
     <Compile Include="..\..\Services\UndoLedger.cs" />
   <Compile Include="..\..\Services\AdbShell.cs" />
+    <Compile Include="..\..\Services\AdbClient.cs" />
+    <Compile Include="..\..\Services\PhoneTools.cs" />
+    <Compile Include="..\..\Services\Tools\Phone\DeviceProfile.cs" />
+    <Compile Include="..\..\Services\Tools\Phone\PhoneVendors.cs" />
+    <Compile Include="..\..\Services\Tools\Phone\PhoneProbe.cs" />
+    <Compile Include="..\..\Services\Tools\Phone\PhonePushGuard.cs" />
+    <Compile Include="..\..\Services\Tools\Phone\PhoneToolService.cs" />
     <Compile Include="..\..\Services\Tools\Files\PathPolicy.cs" />
     <Compile Include="..\..\Services\Tools\Files\FileToolService.cs" />
     <Compile Include="..\..\Services\Processes\IProcessLauncher.cs" />
